@@ -13,32 +13,52 @@ const session = new SessionManager();
 let lastSnapshot: SpatialMap | null = null;
 let lastSnapshotOptions: SnapshotOptions | null = null;
 let lastSessionConfig: SessionConfig | null = null;
-let lastMaxElements: number = 500;
+let lastMaxElements: number = 2000;
+let lastCompact: boolean = true;
 
-// ─── Helper: truncate snapshot to fit context windows ────────────
+// ─── Helper: compact + truncate snapshot to fit context windows ──
 
-function truncateSnapshot(snapshot: SpatialMap, maxElements: number): { json: string; truncated: boolean; totalElements: number } {
+function compactElement(el: any) {
+  return {
+    idx: el.idx,
+    tag: el.tag,
+    role: el.role,
+    label: el.label,
+    text: el.text,
+    bounds: el.bounds,
+    click_center: el.click_center,
+    actionable: el.actionable,
+  };
+}
+
+function formatSnapshot(snapshot: SpatialMap, maxElements: number, compact: boolean): string {
   const totalElements = snapshot.elements.length;
   const truncated = totalElements > maxElements;
+  const elements = truncated ? snapshot.elements.slice(0, maxElements) : snapshot.elements;
+  const outputElements = compact ? elements.map(compactElement) : elements;
+
+  const output: any = {
+    url: snapshot.url,
+    timestamp: snapshot.timestamp,
+    viewport: snapshot.viewport,
+    scroll: snapshot.scroll,
+    page_bounds: snapshot.page_bounds,
+    stats: {
+      ...snapshot.stats,
+      total_elements: totalElements,
+    },
+    elements: outputElements,
+  };
 
   if (truncated) {
-    const truncatedSnapshot = {
-      ...snapshot,
-      elements: snapshot.elements.slice(0, maxElements),
-      stats: {
-        ...snapshot.stats,
-        total_elements: totalElements,
-      },
-      _truncated: {
-        showing: maxElements,
-        total: totalElements,
-        message: `Showing ${maxElements} of ${totalElements} elements. Scroll down and re-snapshot to see more, or use spatial_query to filter the full cached map.`,
-      },
+    output._truncated = {
+      showing: maxElements,
+      total: totalElements,
+      message: `Showing ${maxElements} of ${totalElements} elements. Scroll down and re-snapshot to see more, or use spatial_query to filter the full cached map.`,
     };
-    return { json: JSON.stringify(truncatedSnapshot, null, 2), truncated, totalElements };
   }
 
-  return { json: JSON.stringify(snapshot, null, 2), truncated, totalElements };
+  return JSON.stringify(output, null, 2);
 }
 
 const NEO_VISION_DESCRIPTION = [
@@ -104,8 +124,9 @@ The browser session persists across calls. Calling this again with a different U
       lastSnapshot = await takeSnapshot(page, snapshotOptions);
       lastSnapshotOptions = snapshotOptions;
       lastMaxElements = input.max_elements;
+      lastCompact = input.compact;
 
-      const { json } = truncateSnapshot(lastSnapshot, input.max_elements);
+      const json = formatSnapshot(lastSnapshot, input.max_elements, input.compact);
 
       return {
         content: [
@@ -149,9 +170,8 @@ Requires an active session — call spatial_snapshot first to open a page.`,
 
       lastSnapshot = await click(page, input.x, input.y, input.button, input.click_count, lastSnapshotOptions);
 
-      const { json } = truncateSnapshot(lastSnapshot, lastMaxElements);
       return {
-        content: [{ type: "text" as const, text: json }],
+        content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot, lastMaxElements, lastCompact) }],
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -197,9 +217,8 @@ Returns an updated spatial map. Requires an active session — call spatial_snap
         lastSnapshotOptions
       );
 
-      const { json } = truncateSnapshot(lastSnapshot, lastMaxElements);
       return {
-        content: [{ type: "text" as const, text: json }],
+        content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot, lastMaxElements, lastCompact) }],
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -233,9 +252,8 @@ Returns an updated spatial map reflecting the new scroll position and any newly 
 
       lastSnapshot = await scroll(page, input.delta_x, input.delta_y, input.x, input.y, lastSnapshotOptions);
 
-      const { json } = truncateSnapshot(lastSnapshot, lastMaxElements);
       return {
-        content: [{ type: "text" as const, text: json }],
+        content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot, lastMaxElements, lastCompact) }],
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

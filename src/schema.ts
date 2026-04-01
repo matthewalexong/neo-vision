@@ -38,7 +38,8 @@ export const PublicSnapshotInput = z.object({
   include_non_visible: z.boolean().default(false).describe("Include hidden elements (display:none, visibility:hidden). Usually not needed."),
   max_depth: z.number().int().min(1).max(200).default(50).describe("Max DOM depth to traverse (default: 50). Increase only for deeply nested pages."),
   verbosity: z.enum(["actionable", "landmarks", "all"]).default("actionable").describe("What to include: 'actionable' = buttons/links/inputs only (default, fastest), 'landmarks' = + headings/nav/sections, 'all' = every visible element"),
-  max_elements: z.number().int().min(10).max(5000).default(500).describe("Maximum number of elements to return (default: 500). Large pages may have thousands of elements — this cap prevents response overflow. Use spatial_scroll + re-snapshot to see more of the page."),
+  max_elements: z.number().int().min(10).max(10000).default(2000).describe("Maximum elements to return (default: 2000). If truncated, scroll + re-snapshot to see more."),
+  compact: z.boolean().default(true).describe("Return compact elements (default: true). Compact strips CSS layout details, selectors, and DOM hierarchy — keeping only what you need: tag, role, label, text, bounds, click_center, actionable. Set false for full element data."),
 });
 export type PublicSnapshotInput = z.infer<typeof PublicSnapshotInput>;
 
