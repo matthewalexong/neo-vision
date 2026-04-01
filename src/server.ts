@@ -5,18 +5,28 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SessionManager, type SessionConfig } from "./session.js";
 import { takeSnapshot, navigateWithFallback, type SnapshotOptions } from "./snapshot.js";
 import { click, type as typeAction, scroll } from "./actions.js";
-import { queryMap } from "./query.js";
-import { SnapshotInput, ClickInput, TypeInput, ScrollInput, QueryInput } from "./schema.js";
+import { SnapshotInput, PublicSnapshotInput, ClickInput, TypeInput, ScrollInput, QueryInput } from "./schema.js";
 import type { SpatialMap } from "./schema.js";
+import { queryMap } from "./query.js";
 
 const session = new SessionManager();
 let lastSnapshot: SpatialMap | null = null;
 let lastSnapshotOptions: SnapshotOptions | null = null;
 let lastSessionConfig: SessionConfig | null = null;
 
+const NEO_VISION_DESCRIPTION = [
+  "See the web the way Neo sees the Matrix.",
+  "Launches a real Chrome browser automatically — no setup, no CDP, no manual browser management.",
+  "",
+  "WORKFLOW: spatial_snapshot (open URL) → spatial_click / spatial_type / spatial_scroll (interact) → spatial_query (filter cached map).",
+  "Every action tool returns an updated spatial map automatically. Use element.click_center coordinates to target elements.",
+  "Do NOT launch Chrome yourself or use any other browser automation — this server handles everything.",
+].join(" ");
+
 const server = new McpServer({
   name: "neo-vision",
-  version: "0.1.0",
+  version: "0.2.0",
+  description: NEO_VISION_DESCRIPTION,
 });
 
 // ─── Helper: get the current page (reuses last session config) ──
@@ -33,19 +43,22 @@ async function getActivePage(): Promise<import("playwright").Page> {
 
 server.tool(
   "spatial_snapshot",
-  "Take a deterministic spatial snapshot of a web page. Returns a JSON map of all visible elements with pixel coordinates, ARIA roles, accessible labels, and actionability flags. Use this to understand what's on the page and where everything is.",
-  SnapshotInput.shape,
+  `Navigate to a URL and return a spatial map of the page. Launches a real Chrome browser automatically — no setup required.
+
+Returns a JSON object with every visible element's pixel coordinates, ARIA roles, accessible labels, and actionability flags. Use the click_center coordinates from the response to target elements with spatial_click or spatial_type.
+
+The browser session persists across calls. Calling this again with a different URL navigates to that URL. Calling with the same URL reloads it.`,
+  PublicSnapshotInput.shape,
   async (params) => {
     try {
-      const input = SnapshotInput.parse(params);
+      const input = PublicSnapshotInput.parse(params);
 
+      // Apply internal defaults — agents never need to set these
       const config: SessionConfig = {
-        browserMode: input.browser_mode,
+        browserMode: "stealth",
         viewportWidth: input.viewport_width,
         viewportHeight: input.viewport_height,
         zoom: input.zoom,
-        cdpUrl: input.cdp_url,
-        chromePath: input.chrome_path,
       };
 
       const page = await session.getPage(config);
@@ -86,7 +99,11 @@ server.tool(
 
 server.tool(
   "spatial_click",
-  "Click an element at the given coordinates. Use click_center coordinates from a spatial_snapshot result. Returns an updated spatial map after the click settles.",
+  `Click an element on the page at exact pixel coordinates. Use the click_center.x and click_center.y values from a spatial_snapshot element.
+
+Returns an updated spatial map reflecting the page state after the click (including any navigation, modals, or DOM changes triggered by the click). You do NOT need to call spatial_snapshot again after clicking.
+
+Requires an active session — call spatial_snapshot first to open a page.`,
   ClickInput.shape,
   async (params) => {
     try {
@@ -119,7 +136,11 @@ server.tool(
 
 server.tool(
   "spatial_type",
-  "Type text into the focused element or at a given coordinate. Optionally clear existing text first and/or press Enter after. Returns an updated spatial map.",
+  `Type text into an element. If x/y coordinates are provided, clicks that position first to focus the element, then types. Otherwise types into whatever element currently has focus.
+
+Set clear_first=true to replace existing text (selects all + deletes before typing). Set press_enter=true to submit after typing (useful for search boxes).
+
+Returns an updated spatial map. Requires an active session — call spatial_snapshot first.`,
   TypeInput.shape,
   async (params) => {
     try {
@@ -162,7 +183,9 @@ server.tool(
 
 server.tool(
   "spatial_scroll",
-  "Scroll the page or a scrollable container. Returns an updated spatial map reflecting the new scroll position.",
+  `Scroll the page or a specific scrollable container. Use delta_y with positive values to scroll down, negative to scroll up. Optionally target a specific scrollable element by passing its x/y coordinates.
+
+Returns an updated spatial map reflecting the new scroll position and any newly visible elements. Requires an active session — call spatial_snapshot first.`,
   ScrollInput.shape,
   async (params) => {
     try {
@@ -195,7 +218,9 @@ server.tool(
 
 server.tool(
   "spatial_query",
-  "Filter the current spatial map without re-snapshotting. Find elements by ARIA role, HTML tag, label text, or bounding box region. Much faster than taking a new snapshot.",
+  `Filter the current spatial map without re-loading the page. Search for elements by ARIA role, HTML tag, label text, bounding box region, or actionability. Much faster than taking a new snapshot — use this when the page hasn't changed and you need to find specific elements.
+
+Requires a prior spatial_snapshot call (uses the cached map).`,
   QueryInput.shape,
   async (params) => {
     try {
