@@ -146,10 +146,14 @@ export const STEALTH_PATCHES = `
   }
 
   // 7. Ensure navigator.platform looks real
-  if (navigator.platform === '' || navigator.platform === 'Linux x86_64') {
-    // Most Chrome users are on Windows or Mac
+  if (navigator.platform === '' || navigator.platform === 'Linux x86_64' || navigator.platform === 'Linux aarch64') {
+    // Match platform to the user agent — most real Chrome sessions report MacIntel or Win32
+    const ua = navigator.userAgent || '';
+    let fakePlatform = 'Win32';
+    if (ua.includes('Macintosh') || ua.includes('Mac OS X')) fakePlatform = 'MacIntel';
+    else if (ua.includes('Linux')) fakePlatform = 'Linux x86_64';
     Object.defineProperty(navigator, 'platform', {
-      get: () => 'Win32',
+      get: () => fakePlatform,
     });
   }
 

@@ -86,16 +86,22 @@ Then use the tools: `spatial_snapshot`, `spatial_click`, `spatial_type`, `spatia
 
 | Mode | What it does | Best for |
 |------|-------------|----------|
-| `bundled` | Headless Playwright Chromium with stealth patches | Testing, CI/CD, bulk scraping |
-| `stealth` | Launches your real Chrome install with stealth patches | Sites that detect Playwright but accept Chrome |
-| `attach` | Connects to already-running Chrome via CDP | Maximum stealth — real cookies, real fingerprint, real history |
+| `bundled` | Headless Chromium with `--headless=new` (full browser, not headless shell), stealth patches, persistent profile | CI/CD, bulk scraping, environments without Chrome installed |
+| `stealth` | Launches your real Chrome install, headed, with stealth patches and persistent profile (**default**) | Best detection avoidance — real Chrome + real profile = indistinguishable from a human |
+| `attach` | Connects to already-running Chrome via CDP | Maximum stealth — your existing cookies, fingerprint, and history |
+
+**Persistent profile:** Both `bundled` and `stealth` modes store browser data in `~/.neo-vision/chrome-profile/` by default. This means cookies, localStorage, and browsing history persist across sessions — the browser looks like a real, long-lived install instead of a freshly spawned automation instance. This is critical for avoiding bot detection.
+
+**Anti-automation flags:** NeoVision strips `--enable-automation` (which Playwright normally injects) and adds `--disable-automation` and `--disable-blink-features=AutomationControlled` to prevent Chrome from exposing automation signals.
+
+**Realistic user agent:** Instead of Playwright's default UA string (which includes "HeadlessChrome"), NeoVision sets a real Chrome user agent.
 
 ```typescript
-// Bundled (default)
-const browser = new SpatialBrowser({ mode: 'bundled' });
-
-// Stealth — uses your real Chrome
+// Stealth (default) — uses your real Chrome with persistent profile
 const browser = new SpatialBrowser({ mode: 'stealth' });
+
+// Bundled — headless but with --headless=new (less detectable than old headless)
+const browser = new SpatialBrowser({ mode: 'bundled' });
 
 // Attach — connect to running Chrome
 // First: google-chrome --remote-debugging-port=9222

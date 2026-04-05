@@ -40,6 +40,7 @@ export const PublicSnapshotInput = z.object({
   verbosity: z.enum(["actionable", "landmarks", "all"]).default("actionable").describe("What to include: 'actionable' = buttons/links/inputs only (default, fastest), 'landmarks' = + headings/nav/sections, 'all' = every visible element"),
   max_elements: z.number().int().min(10).max(10000).default(2000).describe("Maximum elements to return (default: 2000). If truncated, scroll + re-snapshot to see more."),
   compact: z.boolean().default(true).describe("Return compact elements (default: true). Compact strips CSS layout details, selectors, and DOM hierarchy — keeping only what you need: tag, role, label, text, bounds, click_center, actionable. Set false for full element data."),
+  output_format: z.enum(["compact", "agent"]).default("compact").describe("Output format: 'compact' (default) returns the full element list with coordinates, roles, and accessibility info for general browsing and UI tasks. 'agent' is optimized for AI context windows on text-dense pages (Wikipedia, Amazon, long articles): returns deduplicated readable page text + only interactive elements within the current viewport with click coordinates. In agent mode, elements are strictly confined to viewport bounds using click_center checks (not just bounding box overlap), preventing wide-layout leakage. Includes viewport_info with scroll position, page height, and percent_remaining. For long pages: use spatial_scroll(delta_y=~670) to advance, then re-request agent output for the next viewport."),
 });
 export type PublicSnapshotInput = z.infer<typeof PublicSnapshotInput>;
 
@@ -62,7 +63,7 @@ export const TypeInput = z.object({
 
 export const ScrollInput = z.object({
   delta_x: z.number().default(0).describe("Horizontal scroll in pixels. Positive = right, negative = left (default: 0)"),
-  delta_y: z.number().default(0).describe("Vertical scroll in pixels. Positive = down, negative = up (default: 0)"),
+  delta_y: z.number().default(0).describe("Vertical scroll in pixels. Positive = down, negative = up (default: 0). After scrolling in agent mode, call spatial_snapshot again to get the next viewport's content."),
   x: z.number().optional().describe("Optional: scroll at this X coordinate (targets a specific scrollable container instead of the page)"),
   y: z.number().optional().describe("Optional: scroll at this Y coordinate (targets a specific scrollable container instead of the page)"),
 });

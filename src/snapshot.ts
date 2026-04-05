@@ -323,6 +323,38 @@ export async function takeSnapshot(
     };
   });
 
+  // Filter out off-screen elements (accessibility skips, negative-positioned UI)
+  // Elements with x < -100 or y < -100 are invisible UI (skip-links, off-canvas menus)
+  elements = elements.filter(
+    (el) => el.bounds.x >= -100 && el.bounds.y >= -100
+  );
+
+  // Filter out decorative/noise elements that provide zero value to any agent task:
+  // - 1x1 pixel tracking elements with no label and no text
+  // - Decorative SVG sub-elements (path, g, circle, ellipse, line, polyline, polygon, rect)
+  //   that have no label, no text, and aren't meaningfully actionable
+  // - Elements with completely empty/null text AND label AND no role AND not actionable
+  elements = elements.filter((el) => {
+    // Keep if actionable (might be a real button/icon the agent needs to click)
+    if (el.actionable) return true;
+    // Keep if it has meaningful text content
+    if (el.text && el.text.trim().length > 0) return true;
+    // Keep if it has an accessible label
+    if (el.label && el.label.trim().length > 0) return true;
+    // Keep if it has a semantic role
+    if (el.role) return true;
+    // Remove 1x1 pixel tracking pixels
+    if (el.bounds.width <= 1 && el.bounds.height <= 1) return false;
+    // Remove decorative SVG sub-elements with no semantic content
+    if (el.tag === "path" || el.tag === "g" || el.tag === "circle" ||
+        el.tag === "ellipse" || el.tag === "line" || el.tag === "polyline" ||
+        el.tag === "polygon") {
+      return false;
+    }
+    // Keep everything else
+    return true;
+  });
+
   // Filter based on verbosity
   if (options.verbosity === "actionable") {
     elements = elements.filter(
