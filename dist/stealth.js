@@ -1,5 +1,3 @@
-import type { Page, BrowserContext } from "playwright";
-
 /**
  * Stealth layer for anti-bot evasion.
  *
@@ -17,9 +15,7 @@ import type { Page, BrowserContext } from "playwright";
  * 8. CSS animation injection for determinism
  * 9. Human-like timing jitter for actions
  */
-
 // ─── Init Scripts (run before every page load) ──────────────────
-
 /**
  * Core stealth patches injected via addInitScript().
  * These run in the browser context before any page JavaScript.
@@ -462,7 +458,6 @@ export const STEALTH_PATCHES = `
   })();
 })();
 `;
-
 /**
  * CSS that disables all animations and transitions for deterministic snapshots.
  */
@@ -475,44 +470,37 @@ export const DETERMINISTIC_CSS = `
   scroll-behavior: auto !important;
 }
 `;
-
 // ─── Human-like Timing ──────────────────────────────────────────
-
 /**
  * Adds natural jitter to timing so actions don't happen at machine precision.
  * Returns a delay in ms that looks human.
  */
-export function humanDelay(baseMs: number, jitterFactor: number = 0.3): number {
-  const jitter = baseMs * jitterFactor * (Math.random() * 2 - 1);
-  return Math.max(50, Math.round(baseMs + jitter));
+export function humanDelay(baseMs, jitterFactor = 0.3) {
+    const jitter = baseMs * jitterFactor * (Math.random() * 2 - 1);
+    return Math.max(50, Math.round(baseMs + jitter));
 }
-
 /**
  * Sleep with human-like jitter.
  */
-export function humanSleep(page: Page, baseMs: number): Promise<void> {
-  return page.waitForTimeout(humanDelay(baseMs));
+export function humanSleep(page, baseMs) {
+    return page.waitForTimeout(humanDelay(baseMs));
 }
-
 /**
  * Human-like typing delay per character (varies between 40-120ms).
  */
-export function typingDelay(): number {
-  return Math.round(40 + Math.random() * 80);
+export function typingDelay() {
+    return Math.round(40 + Math.random() * 80);
 }
-
 // ─── Stealth Application ────────────────────────────────────────
-
 /**
  * Apply all stealth patches to a browser context.
  * Call this after creating the context but before navigating.
  */
-export async function applyStealthToContext(context: BrowserContext): Promise<void> {
-  // Inject stealth patches before every page load
-  await context.addInitScript(STEALTH_PATCHES);
-
-  // Inject deterministic CSS
-  await context.addInitScript(`(() => {
+export async function applyStealthToContext(context) {
+    // Inject stealth patches before every page load
+    await context.addInitScript(STEALTH_PATCHES);
+    // Inject deterministic CSS
+    await context.addInitScript(`(() => {
     const style = document.createElement('style');
     style.id = 'neo-vision-deterministic';
     style.textContent = ${JSON.stringify(DETERMINISTIC_CSS)};
@@ -525,14 +513,13 @@ export async function applyStealthToContext(context: BrowserContext): Promise<vo
     }
   })()`);
 }
-
 /**
  * Apply stealth patches to an already-open page (for attach mode
  * where we can't use addInitScript on the context).
  */
-export async function applyStealthToPage(page: Page): Promise<void> {
-  await page.evaluate(STEALTH_PATCHES);
-  await page.evaluate(`(() => {
+export async function applyStealthToPage(page) {
+    await page.evaluate(STEALTH_PATCHES);
+    await page.evaluate(`(() => {
     if (!document.getElementById('neo-vision-deterministic')) {
       const style = document.createElement('style');
       style.id = 'neo-vision-deterministic';
@@ -541,16 +528,14 @@ export async function applyStealthToPage(page: Page): Promise<void> {
     }
   })()`);
 }
-
 // ─── Stealth Detection Check ────────────────────────────────────
-
 /**
  * Run a self-check to see if stealth is working.
  * Returns an object with detection vectors and whether they pass.
  * Useful for debugging and for the demo script.
  */
-export async function stealthCheck(page: Page): Promise<Record<string, boolean>> {
-  return page.evaluate(`(() => {
+export async function stealthCheck(page) {
+    return page.evaluate(`(() => {
     const results = {};
 
     // Original checks (1-10)
@@ -631,3 +616,4 @@ export async function stealthCheck(page: Page): Promise<Record<string, boolean>>
     return results;
   })()`);
 }
+//# sourceMappingURL=stealth.js.map

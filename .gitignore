@@ -3,3 +3,16 @@ dist/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# Scratch files
+.mcpregistry_*
+enrichment-*
+gmaps-*
+maryland-*
+extract-chrome-cookies.py
+gmaps-agent.py
+yelp-*.py
+scrape-*.js
+enrich-*.js
+enrich-*.md
+HYBRID.md

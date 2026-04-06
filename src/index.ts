@@ -39,6 +39,35 @@ export type {
   ComputedLayout,
 } from "./schema.js";
 
+// ─── Injectable (browser-side spatial snapshot) ──────────────────
+export {
+  INJECTABLE_SOURCE,
+  getInjectableScript,
+  getInjectableInstaller,
+} from "./injectable.js";
+export type {
+  InjectableSpatialMap,
+  InjectableSpatialElement,
+  InjectableBounds,
+  InjectablePoint,
+  InjectableOptions,
+} from "./injectable.js";
+
+// ─── Chrome Bridge (extension-based browser control) ───────────────
+export { ChromeBridge, type BridgeConfig } from "./bridge.js";
+
+// ─── Pacing (human-like throttling for scraping) ─────────────────
+export {
+  PacingEngine,
+  getCaptchaDetector,
+  CAPTCHA_DETECTOR_SOURCE,
+} from "./pacing.js";
+export type {
+  PacingConfig,
+  PacingInstruction,
+  PacingStats,
+} from "./pacing.js";
+
 import { SessionManager, type SessionConfig } from "./session.js";
 import { takeSnapshot, navigateWithFallback, type SnapshotOptions } from "./snapshot.js";
 import { click as rawClick, type as rawType, scroll as rawScroll } from "./actions.js";

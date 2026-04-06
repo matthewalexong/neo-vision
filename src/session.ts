@@ -1,6 +1,8 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { BrowserMode } from "./schema.js";
 import { applyStealthToContext, applyStealthToPage } from "./stealth.js";
+import { execSync, spawn } from "child_process";
+import * as http from "http";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
@@ -102,6 +104,149 @@ process.on("exit", cleanupLock);
 process.on("SIGINT", () => { cleanupLock(); process.exit(130); });
 process.on("SIGTERM", () => { cleanupLock(); process.exit(143); });
 
+// ─── CDP Auto-Restart Helpers ─────────────────────────────────
+// When the user's Chrome isn't running with --remote-debugging-port,
+// we automatically restart it with the flag. Chrome restores all
+// tabs on macOS by default, so the user barely notices.
+
+const CHROME_PATHS: Record<string, string[]> = {
+  darwin: [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  ],
+  linux: [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium-browser",
+  ],
+  win32: [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  ],
+};
+
+function findChromePath(): string | null {
+  const candidates = CHROME_PATHS[process.platform] || [];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * Check if a CDP endpoint is responding on the given URL.
+ */
+function checkCDP(cdpUrl: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const url = new URL("/json/version", cdpUrl);
+    const req = http.get(url, (res) => {
+      res.resume(); // drain
+      resolve(res.statusCode === 200);
+    });
+    req.on("error", () => resolve(false));
+    req.setTimeout(1000, () => { req.destroy(); resolve(false); });
+  });
+}
+
+/**
+ * Poll until CDP endpoint is ready, with timeout.
+ */
+async function waitForCDP(cdpUrl: string, timeoutMs: number = 15000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await checkCDP(cdpUrl)) return true;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return false;
+}
+
+/**
+ * Gracefully quit Chrome on macOS via AppleScript, wait for it to
+ * actually exit, then relaunch with --remote-debugging-port.
+ */
+async function restartChromeWithCDP(port: number = 9222): Promise<void> {
+  const platform = process.platform;
+  const chromePath = findChromePath();
+
+  if (!chromePath) {
+    throw new Error(
+      "Could not find Chrome installation. Install Google Chrome or pass the path manually."
+    );
+  }
+
+  // Step 1: Gracefully quit Chrome if it's running
+  if (platform === "darwin") {
+    try {
+      execSync(
+        `osascript -e 'tell application "Google Chrome" to quit'`,
+        { timeout: 5000 }
+      );
+    } catch {
+      // Chrome might not be running — that's fine
+    }
+  } else if (platform === "linux") {
+    try {
+      execSync("pkill -TERM -f 'google-chrome|chromium'", { timeout: 5000 });
+    } catch { /* not running */ }
+  } else if (platform === "win32") {
+    try {
+      execSync("taskkill /IM chrome.exe /F", { timeout: 5000 });
+    } catch { /* not running */ }
+  }
+
+  // Step 2: Wait for Chrome to fully exit
+  const exitStart = Date.now();
+  while (Date.now() - exitStart < 8000) {
+    try {
+      if (platform === "darwin") {
+        const result = execSync("pgrep -f 'Google Chrome'", { encoding: "utf-8" }).trim();
+        if (!result) break;
+      } else if (platform === "linux") {
+        const result = execSync("pgrep -f 'google-chrome|chromium'", { encoding: "utf-8" }).trim();
+        if (!result) break;
+      } else {
+        break; // Windows taskkill is synchronous
+      }
+    } catch {
+      break; // pgrep returns non-zero when no matches — Chrome is gone
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  // Step 3: Relaunch Chrome with CDP flag
+  // Use 'open' on macOS to launch properly as a GUI app, or spawn directly on Linux
+  if (platform === "darwin") {
+    // 'open -a' with --args passes flags to Chrome
+    // We use spawn (detached) so it doesn't block or die with our process
+    const child = spawn("open", [
+      "-a", "Google Chrome",
+      "--args",
+      `--remote-debugging-port=${port}`,
+    ], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } else {
+    const child = spawn(chromePath, [
+      `--remote-debugging-port=${port}`,
+    ], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  }
+
+  // Step 4: Wait for CDP to become available
+  const ready = await waitForCDP(`http://localhost:${port}`, 15000);
+  if (!ready) {
+    throw new Error(
+      `Chrome relaunched but CDP endpoint not responding on port ${port} after 15s. ` +
+      "Chrome may still be loading — try calling spatial_connect_cdp again in a few seconds."
+    );
+  }
+}
+
 export interface SessionConfig {
   browserMode: BrowserMode;
   viewportWidth: number;
@@ -123,13 +268,108 @@ export class SessionManager {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private config: SessionConfig | null = null;
+  private cdpConnected: boolean = false;
+
+  /**
+   * Connect to the user's Chrome via CDP.
+   * If Chrome isn't running with --remote-debugging-port, NeoVision
+   * automatically restarts it with the flag. Chrome restores all tabs
+   * on relaunch, so the user barely notices.
+   *
+   * Flow:
+   *   1. Try connecting to cdpUrl
+   *   2. If refused → restart Chrome with CDP enabled → retry
+   *   3. Grab the first context + page
+   */
+  async connectCDP(cdpUrl: string = "http://localhost:9222"): Promise<{
+    pages: number;
+    contexts: number;
+    url: string | null;
+    restarted: boolean;
+  }> {
+    // Close any existing session first
+    if (this.browser || this.page) {
+      await this.close();
+    }
+
+    let restarted = false;
+
+    // Step 1: Try connecting directly — maybe Chrome already has CDP open
+    const alreadyReady = await checkCDP(cdpUrl);
+
+    if (!alreadyReady) {
+      // Step 2: Chrome isn't listening on CDP — restart it with the flag
+      const parsed = new URL(cdpUrl);
+      const port = parseInt(parsed.port, 10) || 9222;
+      console.error(`CDP not available at ${cdpUrl} — restarting Chrome with --remote-debugging-port=${port}...`);
+      await restartChromeWithCDP(port);
+      restarted = true;
+    }
+
+    // Step 3: Connect via CDP
+    this.browser = await chromium.connectOverCDP(cdpUrl);
+    this.cdpConnected = true;
+
+    const contexts = this.browser.contexts();
+    if (contexts.length > 0) {
+      this.context = contexts[0];
+      const pages = this.context.pages();
+      if (pages.length > 0) {
+        // Grab the first page (usually the active tab)
+        this.page = pages[0];
+      }
+    }
+
+    // Store config so getPage() knows we're in attach mode
+    this.config = {
+      browserMode: "attach",
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      zoom: 1,
+      cdpUrl,
+    };
+
+    return {
+      pages: this.context?.pages().length ?? 0,
+      contexts: contexts.length,
+      url: this.page?.url() ?? null,
+      restarted,
+    };
+  }
+
+  /**
+   * Whether we're connected to an external Chrome via CDP.
+   * When true, spatial_snapshot should navigate on the existing page
+   * instead of trying to launch a new browser.
+   */
+  isCDPConnected(): boolean {
+    return this.cdpConnected && this.browser !== null;
+  }
 
   async getPage(config: SessionConfig): Promise<Page> {
+    // If we're CDP-connected, reuse the existing page — don't launch a new browser.
+    // The config will say "stealth" (default from spatial_snapshot) but we want
+    // to stay on the CDP connection.
+    if (this.cdpConnected && this.page) {
+      return this.page;
+    }
+
     if (this.page && this.config && !this.configMatches(config)) {
       await this.close();
     }
+    // Check if existing page is still alive — Chrome may have crashed
     if (this.page) {
-      return this.page;
+      try {
+        if (this.page.isClosed()) {
+          console.error("Chrome page was closed unexpectedly — reconnecting...");
+          await this.close();
+        } else {
+          return this.page;
+        }
+      } catch {
+        console.error("Chrome page unreachable — reconnecting...");
+        await this.close();
+      }
     }
 
     this.config = config;
@@ -155,7 +395,7 @@ export class SessionManager {
       deviceScaleFactor: config.zoom,
       locale: "en-US",
       timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
-      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
       reducedMotion: "reduce" as const,
     };
 
@@ -163,28 +403,57 @@ export class SessionManager {
     // when Chrome was previously killed without clean shutdown
     cleanStaleChromelocks(profileDir);
 
+    // Retry Chrome launch with exponential backoff (1s, 2s, 4s)
+    // Handles transient failures on memory-constrained systems
+    const MAX_RETRIES = 3;
+    const launchBrowser = async () => {
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          switch (config.browserMode) {
+            case "bundled":
+              this.context = await chromium.launchPersistentContext(profileDir, {
+                headless: false,
+                args: stealthArgs,
+                ignoreDefaultArgs: ["--enable-automation"],
+                ...contextOpts,
+              });
+              this.browser = this.context.browser();
+              return;
+
+            case "stealth":
+              this.context = await chromium.launchPersistentContext(profileDir, {
+                headless: false,
+                channel: "chrome",
+                executablePath: config.chromePath || undefined,
+                args: stealthArgs,
+                ignoreDefaultArgs: ["--enable-automation"],
+                ...contextOpts,
+                bypassCSP: true,
+              });
+              this.browser = this.context.browser();
+              return;
+
+            default:
+              return; // attach mode handled separately
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (attempt < MAX_RETRIES) {
+            const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+            console.error(`Chrome launch failed (attempt ${attempt}/${MAX_RETRIES}): ${msg}. Retrying in ${backoffMs}ms...`);
+            cleanStaleChromelocks(profileDir);
+            await new Promise(r => setTimeout(r, backoffMs));
+          } else {
+            throw new Error(`Chrome failed to launch after ${MAX_RETRIES} attempts: ${msg}`);
+          }
+        }
+      }
+    };
+
     switch (config.browserMode) {
       case "bundled":
-        this.context = await chromium.launchPersistentContext(profileDir, {
-          headless: true,
-          args: [...stealthArgs, "--headless=new"],
-          ignoreDefaultArgs: ["--enable-automation"],
-          ...contextOpts,
-        });
-        this.browser = this.context.browser();
-        break;
-
       case "stealth":
-        this.context = await chromium.launchPersistentContext(profileDir, {
-          headless: false,
-          channel: "chrome",
-          executablePath: config.chromePath || undefined,
-          args: stealthArgs,
-          ignoreDefaultArgs: ["--enable-automation"],
-          ...contextOpts,
-          bypassCSP: true,
-        });
-        this.browser = this.context.browser();
+        await launchBrowser();
         break;
 
       case "attach": {
@@ -235,11 +504,81 @@ export class SessionManager {
     return this.page;
   }
 
+  getCurrentContext(): BrowserContext | null {
+    return this.context;
+  }
+
   getCurrentConfig(): SessionConfig | null {
     return this.config;
   }
 
+  /**
+   * Import cookies into the browser context.
+   * Accepts Playwright-format cookies (name, value, domain, path, etc.)
+   * Use this to warm up sessions with cookies from the user's real browser,
+   * allowing NeoVision to bypass anti-bot systems like DataDome/Cloudflare
+   * that require established session history.
+   */
+  async importCookies(cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path?: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: "Strict" | "Lax" | "None";
+  }>): Promise<number> {
+    if (!this.context) {
+      throw new Error("No browser context — call getPage() first to start a session");
+    }
+    // Normalize cookies for Playwright
+    const normalized = cookies.map(c => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || "/",
+      expires: c.expires || -1,
+      httpOnly: c.httpOnly ?? false,
+      secure: c.secure ?? true,
+      sameSite: c.sameSite || "Lax" as const,
+    }));
+    await this.context.addCookies(normalized);
+    return normalized.length;
+  }
+
+  /**
+   * Export all cookies from the current browser context.
+   * Useful for saving session state.
+   */
+  async exportCookies(domains?: string[]): Promise<any[]> {
+    if (!this.context) {
+      throw new Error("No browser context — call getPage() first to start a session");
+    }
+    let cookies = await this.context.cookies();
+    if (domains && domains.length > 0) {
+      cookies = cookies.filter(c =>
+        domains.some(d => c.domain.includes(d))
+      );
+    }
+    return cookies;
+  }
+
   async close(): Promise<void> {
+    // In CDP mode, don't close pages or the browser — that's the user's Chrome!
+    // Just disconnect Playwright's CDP handle.
+    if (this.cdpConnected) {
+      if (this.browser) {
+        try { await this.browser.close(); } catch { /* ignore — disconnects CDP */ }
+      }
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+      this.config = null;
+      this.cdpConnected = false;
+      return;
+    }
+
     if (this.page) {
       try { await this.page.close(); } catch { /* ignore */ }
       this.page = null;
@@ -248,7 +587,7 @@ export class SessionManager {
       try { await this.context.close(); } catch { /* ignore */ }
       this.context = null;
     }
-    if (this.browser && this.config?.browserMode !== "attach") {
+    if (this.browser) {
       try { await this.browser.close(); } catch { /* ignore */ }
     }
     this.browser = null;

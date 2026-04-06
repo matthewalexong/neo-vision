@@ -81,6 +81,29 @@ export const QueryInput = z.object({
   actionable_only: z.boolean().default(false).describe("Only return interactive elements (buttons, links, inputs)"),
 });
 
+export const ImportCookiesInput = z.object({
+  cookies: z.array(z.object({
+    name: z.string().describe("Cookie name"),
+    value: z.string().describe("Cookie value"),
+    domain: z.string().describe("Cookie domain (e.g. '.yelp.com')"),
+    path: z.string().optional().describe("Cookie path (default: '/')"),
+    expires: z.number().optional().describe("Expiry as Unix timestamp. -1 for session cookie"),
+    httpOnly: z.boolean().optional().describe("HTTP-only flag"),
+    secure: z.boolean().optional().describe("Secure flag"),
+    sameSite: z.enum(["Strict", "Lax", "None"]).optional().describe("SameSite attribute"),
+  })).describe("Array of cookies to import into the browser session"),
+});
+
+export const ExportCookiesInput = z.object({
+  domains: z.array(z.string()).optional().describe("Filter to cookies matching these domains (e.g. ['yelp.com']). Omit for all cookies."),
+});
+
+export const ConnectCDPInput = z.object({
+  cdp_url: z.string().default("http://localhost:9222").describe("CDP endpoint URL. Default: http://localhost:9222. The user must launch Chrome with: google-chrome --remote-debugging-port=9222"),
+});
+
+export const DisconnectCDPInput = z.object({});
+
 // ─── Output Types ────────────────────────────────────────────────
 
 export interface Bounds {
@@ -101,6 +124,7 @@ export interface ComputedLayout {
   display: string;
   overflow: string;
   opacity: string;
+  visibility: string;
 }
 
 export interface SpatialElement {

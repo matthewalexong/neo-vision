@@ -117,9 +117,40 @@ export async function takeSnapshot(
   page: Page,
   options: SnapshotOptions
 ): Promise<SpatialMap> {
-  // Wait for the page to settle — handle redirects gracefully
+  // Wait for the page to settle using MutationObserver — smart settle
+  // Instead of a fixed wait, we observe DOM mutations and wait until
+  // they stop for 500ms (page is stable), up to settleMs max timeout.
+  // This makes fast-loading pages snappy while giving SPAs time to render.
   if (options.settleMs > 0) {
-    await page.waitForTimeout(options.settleMs);
+    const quietMs = 500; // DOM must be quiet for this long
+    try {
+      await page.evaluate(`new Promise((resolve) => {
+        var maxTimeout = ${options.settleMs};
+        var quietPeriod = ${quietMs};
+        var timer = null;
+        var maxTimer = setTimeout(resolve, maxTimeout);
+        var observer = new MutationObserver(function() {
+          clearTimeout(timer);
+          timer = setTimeout(function() {
+            observer.disconnect();
+            clearTimeout(maxTimer);
+            resolve();
+          }, quietPeriod);
+        });
+        observer.observe(document.documentElement, {
+          childList: true, subtree: true, attributes: true
+        });
+        // Start the quiet timer immediately in case no mutations happen
+        timer = setTimeout(function() {
+          observer.disconnect();
+          clearTimeout(maxTimer);
+          resolve();
+        }, quietPeriod);
+      })`);
+    } catch {
+      // Fallback to fixed wait if evaluate fails (e.g. during navigation)
+      await page.waitForTimeout(options.settleMs);
+    }
   }
 
   // Wait for any pending navigations/redirects to finish
@@ -297,6 +328,7 @@ export async function takeSnapshot(
       display: raw.computedDisplay,
       overflow: raw.computedOverflow,
       opacity: raw.computedOpacity,
+      visibility: raw.computedVisibility,
     };
 
     return {
@@ -329,11 +361,23 @@ export async function takeSnapshot(
     (el) => el.bounds.x >= -100 && el.bounds.y >= -100
   );
 
+  // Build a parent-lookup map for duplicate-text-node detection.
+  // parent_idx is already the new (post-reindex) index of the parent.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parentMap = new Map<number, any>();
+  for (const el of elements) {
+    if (el.parent_idx !== null) parentMap.set(el.idx, el);
+  }
+
   // Filter out decorative/noise elements that provide zero value to any agent task:
   // - 1x1 pixel tracking elements with no label and no text
   // - Decorative SVG sub-elements (path, g, circle, ellipse, line, polyline, polygon, rect)
   //   that have no label, no text, and aren't meaningfully actionable
-  // - Elements with completely empty/null text AND label AND no role AND not actionable
+  // - Empty wrapper divs/spans: no text, no label, no role, not actionable
+  // - Hidden elements (opacity:0, visibility:hidden, display:none) — always noise regardless
+  //   of includeNonVisible; includeNonVisible only controls elements that are technically
+  //   in the layout tree but not visually rendered
+  // - Duplicate text nodes: child has identical text to its parent — child is the noise
   elements = elements.filter((el) => {
     // Keep if actionable (might be a real button/icon the agent needs to click)
     if (el.actionable) return true;
@@ -350,6 +394,29 @@ export async function takeSnapshot(
         el.tag === "ellipse" || el.tag === "line" || el.tag === "polyline" ||
         el.tag === "polygon") {
       return false;
+    }
+    // Remove empty wrapper divs/spans: no text, no label, no role, not actionable
+    if ((el.tag === "div" || el.tag === "span") &&
+        !el.actionable &&
+        (!el.text || el.text.trim().length === 0) &&
+        (!el.label || el.label.trim().length === 0) &&
+        !el.role) {
+      return false;
+    }
+    // Remove hidden elements (genuinely invisible — opacity:0, visibility:hidden, display:none)
+    // These have no value to any agent regardless of includeNonVisible setting
+    const cs = el.computed;
+    if (cs) {
+      if (cs.opacity === "0" || cs.visibility === "hidden" || cs.display === "none") {
+        return false;
+      }
+    }
+    // Remove duplicate text nodes: child has identical text to its parent
+    if (el.text && el.parent_idx !== null) {
+      const parent = parentMap.get(el.parent_idx);
+      if (parent && parent.text === el.text) {
+        return false;
+      }
     }
     // Keep everything else
     return true;

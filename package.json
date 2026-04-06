@@ -1,6 +1,6 @@
 {
   "name": "neo-vision",
-  "version": "0.2.2",
+  "version": "0.5.0",
   "description": "See the web the way Neo sees the Matrix. Deterministic spatial maps of web pages for AI agent navigation — pixel-precise coordinates, ARIA roles, actionability flags, and a built-in stealth layer that defeats anti-bot detection.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./injectable": {
+      "import": "./dist/injectable.js",
+      "types": "./dist/injectable.d.ts"
     },
     "./server": {
       "import": "./dist/server.js",
@@ -25,7 +29,8 @@
     "demo": "tsx src/demo.ts",
     "test:snapshot": "tsx src/test-snapshot.ts",
     "test:stealth": "tsx src/demo.ts --stealth-check",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "echo '\\n  NeoVision installed! Run: npx neo-vision --setup\\n  Or see: https://github.com/matthewalexong/neo-vision#bridge\\n'"
   },
   "keywords": [
     "mcp",
@@ -64,18 +69,21 @@
   },
   "files": [
     "dist/**/*",
+    "extension/**/*",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "playwright": "^1.50.0",
+    "ws": "^8.20.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.3.3"
   },
   "mcpName": "io.github.matthewalexong/neo-vision"
 }
