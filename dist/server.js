@@ -894,12 +894,30 @@ The pacer also provides a CAPTCHA detection script (action: "get_captcha_detecto
 });
 // ─── Chrome Bridge (Extension-based browser control) ─────────────
 const bridge = new ChromeBridge({ port: 7665 });
-server.tool("bridge_status", `Check if the NeoVision Chrome extension is connected.
+server.tool("bridge_status", `Check if the NeoVision Chrome extension is connected. If not connected, automatically launches Chrome with the extension loaded and waits for it to connect.
 
-Returns connection status. If not connected, the user needs to:
-1. Load the NeoVision Bridge extension in Chrome (chrome://extensions → Load unpacked → select the extension/ folder)
-2. Click the extension icon and hit "Connect"
-3. The extension connects to this MCP server's WebSocket on port 7665`, {}, async () => {
+Returns connection status. Bridge tools auto-connect — you don't need to call this first.
+But it's useful for checking status or triggering a reconnect.`, {}, async () => {
+    // Auto-connect if not already connected
+    if (!bridge.ready) {
+        try {
+            await bridge.ensureConnected();
+        }
+        catch (err) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            connected: false,
+                            port: 7665,
+                            error: err.message,
+                            message: "Auto-connect failed. Make sure Chrome is installed.",
+                        }, null, 2),
+                    }],
+                isError: true,
+            };
+        }
+    }
     return {
         content: [{
                 type: "text",
@@ -908,7 +926,7 @@ Returns connection status. If not connected, the user needs to:
                     port: 7665,
                     message: bridge.ready
                         ? "Chrome extension is connected. You can use bridge_navigate, bridge_execute_js, bridge_inject_spatial, bridge_click, bridge_type, bridge_screenshot."
-                        : "Chrome extension is NOT connected. Install the NeoVision Bridge extension and click Connect.",
+                        : "Chrome extension is NOT connected and auto-launch failed.",
                 }, null, 2),
             }],
     };

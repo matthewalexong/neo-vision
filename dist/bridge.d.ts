@@ -23,14 +23,31 @@ export declare class ChromeBridge {
     private requestCounter;
     private port;
     private _ready;
+    private chromeProcess;
+    private autoLaunching;
+    private extensionPath;
     constructor(config?: BridgeConfig);
+    /**
+     * Auto-launch Chrome with the NeoVision Bridge extension loaded.
+     * Called automatically when bridge tools are used but no extension is connected.
+     * Uses --load-extension to inject the extension without manual setup.
+     */
+    autoLaunchChrome(): Promise<void>;
+    /** Wait for the Chrome extension to connect via WebSocket */
+    private waitForExtension;
+    /**
+     * Ensure the extension is connected, auto-launching Chrome if needed.
+     * This is the main entry point for bridge tools — call this before any command.
+     */
+    ensureConnected(): Promise<void>;
     /** Start the WebSocket server */
     start(): Promise<void>;
     /** Relay a command from an external client to the extension, then route the response back */
     private relayToExtension;
     /** Check if the extension is connected */
     get ready(): boolean;
-    /** Send a command to the extension and wait for a response */
+    /** Send a command to the extension and wait for a response.
+     *  Automatically launches Chrome with the extension if not connected. */
     send(command: string, params?: Record<string, any>, timeoutMs?: number): Promise<any>;
     /** Handle a response from the extension (could be for an MCP tool or an external client relay) */
     private handleExtensionMessage;
@@ -61,6 +78,6 @@ export declare class ChromeBridge {
     getPageInfo(tabId?: number): Promise<any>;
     /** Get page text content */
     getPageText(tabId?: number): Promise<any>;
-    /** Stop the bridge server */
+    /** Stop the bridge server and any auto-launched Chrome */
     stop(): Promise<void>;
 }

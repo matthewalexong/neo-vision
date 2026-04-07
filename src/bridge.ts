@@ -15,6 +15,10 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import { INJECTABLE_SOURCE, getInjectableScript } from "./injectable.js";
+import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { resolve, dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 export interface BridgeConfig {
   port?: number;
@@ -34,9 +38,138 @@ export class ChromeBridge {
   private requestCounter = 0;
   private port: number;
   private _ready = false;
+  private chromeProcess: ReturnType<typeof spawn> | null = null;
+  private autoLaunching = false;
+  private extensionPath: string;
 
   constructor(config: BridgeConfig = {}) {
     this.port = config.port || 7665;
+    // Resolve extension path relative to this file's location (src/ or dist/)
+    const thisDir = typeof __dirname !== "undefined"
+      ? __dirname
+      : dirname(fileURLToPath(import.meta.url));
+    this.extensionPath = resolve(thisDir, "..", "extension");
+  }
+
+  /**
+   * Auto-launch Chrome with the NeoVision Bridge extension loaded.
+   * Called automatically when bridge tools are used but no extension is connected.
+   * Uses --load-extension to inject the extension without manual setup.
+   */
+  async autoLaunchChrome(): Promise<void> {
+    if (this.autoLaunching) return; // prevent concurrent launches
+    if (this.ready) return; // already connected
+
+    this.autoLaunching = true;
+    try {
+      if (!existsSync(this.extensionPath)) {
+        throw new Error(`Extension not found at ${this.extensionPath}`);
+      }
+
+      // Find Chrome binary (macOS, Linux, Windows)
+      const chromePaths = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      ];
+
+      let chromeBin: string | null = null;
+      for (const p of chromePaths) {
+        if (existsSync(p)) { chromeBin = p; break; }
+      }
+      if (!chromeBin) {
+        throw new Error("Chrome not found. Install Google Chrome to use bridge tools.");
+      }
+
+      // Check if Chrome is already running — if so, we can't use --load-extension
+      // because Chrome only allows one instance per user-data-dir.
+      // Use a dedicated NeoVision profile to avoid conflicts with the user's main Chrome.
+      const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
+      const profileDir = join(homeDir, ".neo-vision", "bridge-profile");
+
+      console.error(`[NeoVision Bridge] Auto-launching Chrome with extension...`);
+      console.error(`[NeoVision Bridge]   Chrome: ${chromeBin}`);
+      console.error(`[NeoVision Bridge]   Extension: ${this.extensionPath}`);
+
+      this.chromeProcess = spawn(chromeBin, [
+        `--load-extension=${this.extensionPath}`,
+        `--user-data-dir=${profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "about:blank",
+      ], {
+        detached: true,
+        stdio: "ignore",
+      });
+
+      // Don't let the Chrome process prevent Node from exiting
+      this.chromeProcess.unref();
+
+      this.chromeProcess.on("error", (err) => {
+        console.error(`[NeoVision Bridge] Chrome launch failed:`, err);
+      });
+
+      // Wait for extension to connect (up to 15 seconds)
+      const connected = await this.waitForExtension(15000);
+      if (!connected) {
+        throw new Error("Chrome launched but extension did not connect within 15 seconds.");
+      }
+
+      console.error(`[NeoVision Bridge] Chrome extension connected automatically.`);
+    } finally {
+      this.autoLaunching = false;
+    }
+  }
+
+  /** Wait for the Chrome extension to connect via WebSocket */
+  private waitForExtension(timeoutMs: number): Promise<boolean> {
+    if (this.ready) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const check = () => {
+        if (this.ready) {
+          resolve(true);
+        } else if (Date.now() - start > timeoutMs) {
+          resolve(false);
+        } else {
+          setTimeout(check, 500);
+        }
+      };
+      check();
+    });
+  }
+
+  /**
+   * Ensure the extension is connected, auto-launching Chrome if needed.
+   * This is the main entry point for bridge tools — call this before any command.
+   */
+  async ensureConnected(): Promise<void> {
+    if (this.ready) return;
+
+    // Start WebSocket server if not already running
+    if (!this.wss) {
+      await this.start();
+      // Give extension a moment to auto-reconnect (it retries every 5s)
+      const quickConnect = await this.waitForExtension(8000);
+      if (quickConnect) return;
+    }
+
+    // Try auto-launching Chrome with the extension
+    await this.autoLaunchChrome();
+
+    if (!this.ready) {
+      throw new Error(
+        "Could not connect to Chrome extension. " +
+        "Make sure Chrome is installed and the NeoVision extension folder exists."
+      );
+    }
   }
 
   /** Start the WebSocket server */
@@ -147,11 +280,11 @@ export class ChromeBridge {
     return this._ready && this.extension !== null && this.extension.readyState === WebSocket.OPEN;
   }
 
-  /** Send a command to the extension and wait for a response */
+  /** Send a command to the extension and wait for a response.
+   *  Automatically launches Chrome with the extension if not connected. */
   async send(command: string, params: Record<string, any> = {}, timeoutMs = 60000): Promise<any> {
-    if (!this.ready) {
-      throw new Error("Chrome extension not connected. Install the NeoVision Bridge extension and click Connect.");
-    }
+    // Auto-connect: launch Chrome with extension if not connected
+    await this.ensureConnected();
 
     const id = `req_${++this.requestCounter}`;
 
@@ -240,10 +373,13 @@ export class ChromeBridge {
     return this.send("get_page_text", { tabId });
   }
 
-  /** Stop the bridge server */
+  /** Stop the bridge server and any auto-launched Chrome */
   async stop() {
     if (this.extension) this.extension.close();
     if (this.wss) this.wss.close();
     this._ready = false;
+    // Don't kill user's Chrome — they may have tabs open.
+    // Just release references. Chrome stays running independently.
+    this.chromeProcess = null;
   }
 }
