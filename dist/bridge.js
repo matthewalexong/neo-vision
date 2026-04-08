@@ -150,73 +150,120 @@ export class ChromeBridge {
                 "Make sure Chrome is installed and the NeoVision extension folder exists.");
         }
     }
-    /** Start the WebSocket server */
-    start() {
+    /** Start the WebSocket server, trying multiple ports if the default is busy */
+    async start() {
+        const maxPortAttempts = 10; // Try ports 7665–7674
+        for (let attempt = 0; attempt < maxPortAttempts; attempt++) {
+            const port = this.port + attempt;
+            try {
+                await this._startOnPort(port);
+                this.port = port; // Update to the port that actually worked
+                return;
+            }
+            catch (err) {
+                if (err.code === "EADDRINUSE" && attempt < maxPortAttempts - 1) {
+                    console.error(`[NeoVision Bridge] Port ${port} in use, trying ${port + 1}...`);
+                    continue;
+                }
+                throw err;
+            }
+        }
+    }
+    /** Try to start WebSocket server on a specific port */
+    _startOnPort(port) {
         return new Promise((resolve, reject) => {
-            this.wss = new WebSocketServer({ port: this.port });
-            this.wss.on("listening", () => {
-                console.error(`[NeoVision Bridge] WebSocket server listening on port ${this.port}`);
+            const wss = new WebSocketServer({ port });
+            wss.on("listening", () => {
+                this.wss = wss;
+                this._attachWssHandlers();
+                console.error(`[NeoVision Bridge] WebSocket server listening on port ${port}`);
                 resolve();
             });
-            this.wss.on("error", (err) => {
-                console.error(`[NeoVision Bridge] Server error:`, err);
+            wss.on("error", (err) => {
+                wss.close();
                 reject(err);
-            });
-            this.wss.on("connection", (ws) => {
-                // New connection — we don't know yet if it's the extension or an
-                // external client (Python script, etc.). We wait for the first
-                // message to decide. The extension sends a "hello"; external
-                // clients send command messages.
-                let identified = false;
-                ws.on("message", (data) => {
-                    try {
-                        const msg = JSON.parse(data.toString());
-                        // Identify as extension if it sends a hello
-                        if (!identified && msg.type === "hello") {
-                            identified = true;
-                            this.extension = ws;
-                            this._ready = true;
-                            console.error(`[NeoVision Bridge] Extension identified: ${msg.agent} v${msg.version}`);
-                            return;
-                        }
-                        // If this IS the extension, handle its responses to pending requests
-                        if (ws === this.extension) {
-                            this.handleExtensionMessage(msg);
-                            return;
-                        }
-                        // Otherwise, this is an external client sending a command.
-                        // Relay it to the extension and route the response back.
-                        if (!identified) {
-                            identified = true;
-                            this.externalClients.add(ws);
-                            console.error(`[NeoVision Bridge] External client connected`);
-                        }
-                        this.relayToExtension(ws, msg);
-                    }
-                    catch (err) {
-                        console.error("[NeoVision Bridge] Bad message:", err);
-                    }
-                });
-                ws.on("close", () => {
-                    if (ws === this.extension) {
-                        console.error("[NeoVision Bridge] Chrome extension disconnected");
-                        this.extension = null;
-                        this._ready = false;
-                        // Reject all pending requests
-                        for (const [id, req] of this.pendingRequests) {
-                            clearTimeout(req.timer);
-                            req.reject(new Error("Extension disconnected"));
-                        }
-                        this.pendingRequests.clear();
-                    }
-                    else {
-                        this.externalClients.delete(ws);
-                        console.error("[NeoVision Bridge] External client disconnected");
-                    }
-                });
             });
         });
     }
+    /** Attach connection/message handlers to the active WebSocket server */
+    _attachWssHandlers() {
+        if (!this.wss)
+            return;
+        this.wss.on("connection", (ws) => {
+            // New connection — we don't know yet if it's the extension or an
+            // external client (Python script, etc.). We wait for the first
+            // message to decide. The extension sends a "hello"; external
+            // clients send command messages.
+            //
+            // BUG FIX: Chrome's main browser process (NetworkService) sometimes
+            // opens a WebSocket to localhost:7665 but never sends any data.
+            // This stale connection would block the real extension from being
+            // recognized. We set a 10-second identification timeout — any
+            // connection that doesn't send a valid message gets closed.
+            let identified = false;
+            const identifyTimeout = setTimeout(() => {
+                if (!identified) {
+                    console.error("[NeoVision Bridge] Closing unidentified connection (no hello/command within 10s)");
+                    ws.close(4000, "Identification timeout — not a NeoVision client");
+                }
+            }, 10000);
+            ws.on("message", (data) => {
+                try {
+                    const msg = JSON.parse(data.toString());
+                    // Identify as extension if it sends a hello
+                    if (!identified && msg.type === "hello") {
+                        identified = true;
+                        clearTimeout(identifyTimeout);
+                        // If another WebSocket was previously the extension, close it
+                        // (handles reconnect scenarios cleanly)
+                        if (this.extension && this.extension !== ws && this.extension.readyState === WebSocket.OPEN) {
+                            console.error("[NeoVision Bridge] Replacing stale extension connection with new one");
+                            this.extension.close(4001, "Replaced by new extension connection");
+                        }
+                        this.extension = ws;
+                        this._ready = true;
+                        console.error(`[NeoVision Bridge] Extension identified: ${msg.agent} v${msg.version}`);
+                        return;
+                    }
+                    // If this IS the extension, handle its responses to pending requests
+                    if (ws === this.extension) {
+                        this.handleExtensionMessage(msg);
+                        return;
+                    }
+                    // Otherwise, this is an external client sending a command.
+                    // Relay it to the extension and route the response back.
+                    if (!identified) {
+                        identified = true;
+                        clearTimeout(identifyTimeout);
+                        this.externalClients.add(ws);
+                        console.error(`[NeoVision Bridge] External client connected`);
+                    }
+                    this.relayToExtension(ws, msg);
+                }
+                catch (err) {
+                    console.error("[NeoVision Bridge] Bad message:", err);
+                }
+            });
+            ws.on("close", () => {
+                clearTimeout(identifyTimeout);
+                if (ws === this.extension) {
+                    console.error("[NeoVision Bridge] Chrome extension disconnected");
+                    this.extension = null;
+                    this._ready = false;
+                    // Reject all pending requests
+                    for (const [id, req] of this.pendingRequests) {
+                        clearTimeout(req.timer);
+                        req.reject(new Error("Extension disconnected"));
+                    }
+                    this.pendingRequests.clear();
+                }
+                else {
+                    this.externalClients.delete(ws);
+                    console.error("[NeoVision Bridge] External client disconnected");
+                }
+            });
+        });
+    } // end _attachWssHandlers
     /** Relay a command from an external client to the extension, then route the response back */
     relayToExtension(clientWs, msg) {
         if (!this.ready) {

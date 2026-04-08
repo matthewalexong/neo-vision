@@ -26,9 +26,6 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
-    "demo": "tsx src/demo.ts",
-    "test:snapshot": "tsx src/test-snapshot.ts",
-    "test:stealth": "tsx src/demo.ts --stealth-check",
     "prepublishOnly": "npm run build",
     "postinstall": "echo '\\n  NeoVision installed! Run: npx neo-vision --setup\\n  Or see: https://github.com/matthewalexong/neo-vision#bridge\\n'"
   },
@@ -40,18 +37,15 @@
     "web-scraping",
     "spatial-map",
     "dom",
-    "stealth",
     "anti-bot",
     "anti-detection",
-    "playwright",
+    "chrome-extension",
     "claude",
     "openai",
     "langchain",
     "ai-navigation",
     "accessibility",
     "aria",
-    "fingerprint-evasion",
-    "human-like-automation",
     "neo-vision"
   ],
   "author": "Matthew Ong",
@@ -75,7 +69,6 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "playwright": "^1.50.0",
     "ws": "^8.20.0",
     "zod": "^3.24.0"
   },

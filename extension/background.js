@@ -10,33 +10,108 @@
  */
 
 // ─── Config ──────────────────────────────────────────────────────
-const DEFAULT_WS_URL = "ws://localhost:7665";
+const BASE_PORT = 7665;
+const MAX_PORT = 7674;  // Try ports 7665–7674 (matches server-side range)
 let ws = null;
 let connected = false;
 let reconnectTimer = null;
+let currentPort = BASE_PORT;  // Track which port we're connected to
 let managedTabId = null;  // The tab we're controlling
 let tabGroupId = null;
 
 // ─── WebSocket Connection ────────────────────────────────────────
 
+/**
+ * Try connecting to ports BASE_PORT through MAX_PORT sequentially.
+ * On first success, stay on that port. On reconnect after disconnect,
+ * scan all ports again (server may have moved).
+ */
 function connect(wsUrl) {
   if (ws && ws.readyState <= 1) return; // already open/connecting
 
-  wsUrl = wsUrl || DEFAULT_WS_URL;
+  // If a specific URL was passed (e.g. from popup), use it directly
+  if (wsUrl) {
+    return connectToUrl(wsUrl);
+  }
+
+  // Otherwise, scan the port range
+  connectWithPortScan(BASE_PORT);
+}
+
+function connectWithPortScan(port) {
+  if (connected) return; // connected during scan
+  if (port > MAX_PORT) {
+    // All ports failed — wait and retry from the beginning
+    console.log(`[NeoVision] No bridge found on ports ${BASE_PORT}-${MAX_PORT}. Retrying in 5s...`);
+    updateBadge("OFF", "#ef4444");
+    reconnectTimer = setTimeout(() => connectWithPortScan(BASE_PORT), 5000);
+    return;
+  }
+
+  const url = `ws://localhost:${port}`;
+  console.log(`[NeoVision] Trying ${url}...`);
+
+  const testWs = new WebSocket(url);
+
+  // Give each port 2 seconds to connect before moving on
+  const portTimeout = setTimeout(() => {
+    if (testWs.readyState !== 1) {
+      testWs.close();
+      connectWithPortScan(port + 1);
+    }
+  }, 2000);
+
+  testWs.onopen = () => {
+    clearTimeout(portTimeout);
+    // This port works — adopt this WebSocket
+    ws = testWs;
+    connected = true;
+    currentPort = port;
+    console.log(`[NeoVision] Connected to MCP bridge on port ${port}`);
+    clearTimeout(reconnectTimer);
+    updateBadge("ON", "#22c55e");
+    attachWsHandlers(testWs);
+    // Announce ourselves
+    sendWs({ type: "hello", agent: "neovision-chrome-bridge", version: "0.2.0" });
+  };
+
+  testWs.onerror = () => {
+    clearTimeout(portTimeout);
+    testWs.close();
+    // Try next port immediately
+    connectWithPortScan(port + 1);
+  };
+}
+
+function connectToUrl(wsUrl) {
   console.log(`[NeoVision] Connecting to ${wsUrl}...`);
+  const newWs = new WebSocket(wsUrl);
 
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => {
+  newWs.onopen = () => {
+    ws = newWs;
     connected = true;
     console.log("[NeoVision] Connected to MCP bridge");
     clearTimeout(reconnectTimer);
     updateBadge("ON", "#22c55e");
-    // Announce ourselves
-    sendWs({ type: "hello", agent: "neovision-chrome-bridge", version: "0.1.0" });
+    attachWsHandlers(newWs);
+    sendWs({ type: "hello", agent: "neovision-chrome-bridge", version: "0.2.0" });
   };
 
-  ws.onmessage = async (event) => {
+  newWs.onerror = (err) => {
+    console.error("[NeoVision] WebSocket error:", err);
+    newWs.close();
+  };
+
+  newWs.onclose = () => {
+    connected = false;
+    console.log("[NeoVision] Disconnected. Scanning ports in 5s...");
+    updateBadge("OFF", "#ef4444");
+    reconnectTimer = setTimeout(() => connectWithPortScan(BASE_PORT), 5000);
+  };
+}
+
+function attachWsHandlers(socket) {
+  socket.onmessage = async (event) => {
     try {
       const msg = JSON.parse(event.data);
       const result = await handleCommand(msg);
@@ -56,16 +131,17 @@ function connect(wsUrl) {
     }
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
     connected = false;
-    console.log("[NeoVision] Disconnected. Reconnecting in 5s...");
+    ws = null;
+    console.log("[NeoVision] Disconnected. Scanning ports in 5s...");
     updateBadge("OFF", "#ef4444");
-    reconnectTimer = setTimeout(() => connect(wsUrl), 5000);
+    reconnectTimer = setTimeout(() => connectWithPortScan(BASE_PORT), 5000);
   };
 
-  ws.onerror = (err) => {
+  socket.onerror = (err) => {
     console.error("[NeoVision] WebSocket error:", err);
-    ws.close();
+    socket.close();
   };
 }
 
@@ -472,8 +548,8 @@ chrome.alarms.create("neovision-keepalive", { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "neovision-keepalive") {
     if (!connected) {
-      console.log("[NeoVision] Keepalive: reconnecting...");
-      connect(DEFAULT_WS_URL);
+      console.log("[NeoVision] Keepalive: scanning ports...");
+      connect();
     }
   }
 });
@@ -481,29 +557,30 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Auto-connect on extension load
 chrome.runtime.onInstalled.addListener(() => {
   console.log("[NeoVision] Extension installed");
-  connect(DEFAULT_WS_URL);
+  connect();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  connect(DEFAULT_WS_URL);
+  connect();
 });
 
 // Listen for popup messages (manual connect/disconnect)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "connect") {
-    connect(msg.wsUrl || DEFAULT_WS_URL);
+    connect(msg.wsUrl);  // pass explicit URL if provided, otherwise scans
     sendResponse({ status: "connecting" });
   } else if (msg.type === "disconnect") {
     if (ws) ws.close();
+    ws = null;
     connected = false;
     clearTimeout(reconnectTimer);
     updateBadge("OFF", "#ef4444");
     sendResponse({ status: "disconnected" });
   } else if (msg.type === "status") {
-    sendResponse({ connected, wsUrl: DEFAULT_WS_URL, managedTabId, tabGroupId });
+    sendResponse({ connected, port: currentPort, managedTabId, tabGroupId });
   }
   return true; // async response
 });
 
-// Start connection
-connect(DEFAULT_WS_URL);
+// Start connection — scan port range
+connect();

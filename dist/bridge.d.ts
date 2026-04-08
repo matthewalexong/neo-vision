@@ -40,8 +40,12 @@ export declare class ChromeBridge {
      * This is the main entry point for bridge tools — call this before any command.
      */
     ensureConnected(): Promise<void>;
-    /** Start the WebSocket server */
+    /** Start the WebSocket server, trying multiple ports if the default is busy */
     start(): Promise<void>;
+    /** Try to start WebSocket server on a specific port */
+    private _startOnPort;
+    /** Attach connection/message handlers to the active WebSocket server */
+    private _attachWssHandlers;
     /** Relay a command from an external client to the extension, then route the response back */
     private relayToExtension;
     /** Check if the extension is connected */
