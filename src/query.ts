@@ -4,6 +4,7 @@ export interface QueryFilters {
   role?: string;
   tag?: string;
   labelContains?: string;
+  textContains?: string;
   region?: Bounds;
   actionableOnly?: boolean;
 }
@@ -30,6 +31,15 @@ export function queryMap(map: SpatialMap, filters: QueryFilters): SpatialMap {
       (el) =>
         (el.label && el.label.toLowerCase().includes(search)) ||
         (el.text && el.text.toLowerCase().includes(search))
+    );
+  }
+
+  if (filters.textContains) {
+    const search = filters.textContains.toLowerCase();
+    elements = elements.filter(
+      (el) =>
+        (el.text && el.text.toLowerCase().includes(search)) ||
+        (el.label && el.label.toLowerCase().includes(search))
     );
   }
 

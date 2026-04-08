@@ -15,7 +15,7 @@ import { ChromeBridge } from "./bridge.js";
 let lastSnapshot: SpatialMap | null = null;
 let lastMaxElements: number = 2000;
 let lastCompact: boolean = true;
-let lastOutputFormat: "compact" | "agent" = "compact";
+let lastOutputFormat: "compact" | "agent" | "summary" = "compact";
 let lastVerbosity: "actionable" | "landmarks" | "all" = "actionable";
 
 // ─── Helper: compact + truncate snapshot to fit context windows ──
@@ -196,11 +196,87 @@ function formatSnapshot(
   snapshot: SpatialMap,
   maxElements: number,
   compact: boolean,
-  outputFormat: "compact" | "agent" = "compact",
+  outputFormat: "compact" | "agent" | "summary" = "compact",
   verbosity: "actionable" | "landmarks" | "all" = "actionable"
 ): string {
   if (outputFormat === "agent") {
     return formatAgentSnapshot(snapshot, maxElements);
+  }
+
+  if (outputFormat === "summary") {
+    const { width: vw, height: vh } = snapshot.viewport;
+    const { x: sx, y: sy } = snapshot.scroll;
+    const pageH = snapshot.page_bounds.height;
+
+    const pageW = snapshot.page_bounds.width;
+    const effectiveVw = Math.min(vw, pageW);
+    const effectiveVh = Math.min(vh, pageH);
+    const vX1 = sx, vY1 = sy;
+    const vX2 = sx + effectiveVw, vY2 = sy + effectiveVh;
+
+    function inViewport(el: any): boolean {
+      if (el.click_center) {
+        const cx = el.click_center.x, cy = el.click_center.y;
+        return cx >= vX1 && cx < vX2 && cy >= vY1 && cy < vY2;
+      }
+      const cX = el.bounds.x + el.bounds.width / 2;
+      const cY = el.bounds.y + el.bounds.height / 2;
+      return cX >= vX1 && cX < vX2 && cY >= vY1 && cY < vY2;
+    }
+
+    // Extract title: prefer <title>, then h1, then URL
+    let title = snapshot.url;
+    for (const el of snapshot.elements) {
+      if (el.tag === "title" && el.text) { title = el.text; break; }
+    }
+    if (title === snapshot.url) {
+      for (const el of snapshot.elements) {
+        if (el.role === "heading" && el.tag === "h1" && el.text) { title = el.text; break; }
+      }
+    }
+
+    // Headings: first 15 elements with role containing "heading"
+    const headings = snapshot.elements
+      .filter((el) => el.role && el.role.toLowerCase().includes("heading"))
+      .slice(0, 15)
+      .map((el) => ({
+        idx: el.idx,
+        tag: el.tag,
+        role: el.role,
+        label: el.label,
+        text: el.text,
+        click_center: el.click_center,
+      }));
+
+    // Top interactive: first 15 actionable elements in viewport
+    const topInteractive = snapshot.elements
+      .filter((el) => el.actionable && el.click_center && inViewport(el))
+      .slice(0, 15)
+      .map((el) => ({
+        idx: el.idx,
+        tag: el.tag,
+        role: el.role,
+        label: el.label,
+        text: el.text,
+        click_center: el.click_center,
+      }));
+
+    return JSON.stringify({
+      url: snapshot.url,
+      title,
+      timestamp: snapshot.timestamp,
+      viewport: snapshot.viewport,
+      scroll: snapshot.scroll,
+      page_bounds: snapshot.page_bounds,
+      stats: {
+        total_elements: snapshot.stats.total_elements,
+        actionable_elements: snapshot.stats.actionable_elements,
+        focusable_elements: snapshot.stats.focusable_elements,
+      },
+      landmarks: headings,
+      top_interactive: topInteractive,
+      hint: "Full snapshot cached in server memory. Use spatial_query to search by role, tag, text, or region.",
+    }, null, 2);
   }
 
   const totalElements = snapshot.elements.length;
@@ -265,8 +341,10 @@ server.tool(
 **Output modes** (controlled by output_format parameter):
   - 'compact' (default): Returns every visible element with pixel coordinates, ARIA roles, accessible labels, and actionability flags.
   - 'agent': Optimized for AI agent context windows. Returns deduplicated readable page text + only interactive/viewport-scoped elements.
+  - 'summary': Stores full map in server memory, returns only a lightweight receipt with page title, stats, key landmarks (headings), and top 15 interactive elements. Best for context-window efficiency — use spatial_query to drill into the cached data by role, tag, text, or region.
 
-The browser session persists across calls. Calling this again with a different URL navigates to that URL.`,
+The browser session persists across calls. Calling this again with a different URL navigates to that URL.
+The full DOM map is always cached server-side regardless of output format. Use spatial_query to search the cached map without re-snapshotting.`,
   PublicSnapshotInput.shape,
   async (params) => {
     try {
@@ -469,6 +547,7 @@ Requires a prior spatial_snapshot call (uses the cached map).`,
         role: input.role,
         tag: input.tag,
         labelContains: input.label_contains,
+        textContains: input.text_contains,
         region: input.region,
         actionableOnly: input.actionable_only,
       });

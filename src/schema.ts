@@ -12,7 +12,7 @@ export const PublicSnapshotInput = z.object({
   verbosity: z.enum(["actionable", "landmarks", "all"]).default("actionable").describe("'actionable' = buttons/links/inputs only (default), 'landmarks' = + headings/nav/sections, 'all' = every element"),
   max_elements: z.number().int().min(10).max(10000).default(2000).describe("Maximum elements to return (default: 2000)"),
   compact: z.boolean().default(true).describe("Return compact elements (default: true). Set false for full element data."),
-  output_format: z.enum(["compact", "agent"]).default("compact").describe("'compact' (default) = full element list, 'agent' = readable page text + interactive elements (optimized for AI context windows)"),
+  output_format: z.enum(["compact", "agent", "summary"]).default("compact").describe("'compact' (default) = full element list, 'agent' = readable page text + interactive elements (optimized for AI context windows), 'summary' = lightweight receipt with page overview + key landmarks + top interactive elements. Stores full map in server RAM. Use spatial_query to drill into cached data."),
 });
 export type PublicSnapshotInput = z.infer<typeof PublicSnapshotInput>;
 
@@ -43,6 +43,7 @@ export const QueryInput = z.object({
   role: z.string().optional().describe('Filter by ARIA role, e.g. "button", "link", "textbox", "heading"'),
   tag: z.string().optional().describe('Filter by HTML tag, e.g. "input", "a", "div"'),
   label_contains: z.string().optional().describe("Filter elements whose accessible label contains this text (case-insensitive)"),
+  text_contains: z.string().optional().describe("Filter elements whose visible text or label contains this string (case-insensitive). This is the primary way to search the cached snapshot after using output_format='summary'."),
   region: z.object({
     x: z.number(),
     y: z.number(),
