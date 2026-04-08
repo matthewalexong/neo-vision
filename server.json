@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.matthewalexong/neo-vision",
-  "description": "Spatial DOM maps for AI agent browser navigation with anti-bot stealth.",
+  "description": "Spatial DOM maps for AI agent browser navigation — pixel-precise coordinates, ARIA roles, actionability flags, anti-bot stealth, bridge mode for real Chrome, and human-like behavioral simulation.",
   "repository": {
     "url": "https://github.com/matthewalexong/neo-vision",
     "source": "github"
   },
-  "version": "0.2.2",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "neo-vision",
-      "version": "0.2.2",
+      "version": "0.5.0",
       "transport": {
         "type": "stdio"
       }
