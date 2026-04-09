@@ -86,22 +86,18 @@ export class ChromeBridge {
         throw new Error("Chrome not found. Install Google Chrome to use bridge tools.");
       }
 
-      // Check if Chrome is already running — if so, we can't use --load-extension
-      // because Chrome only allows one instance per user-data-dir.
-      // Use a dedicated NeoVision profile to avoid conflicts with the user's main Chrome.
-      const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
-      const profileDir = join(homeDir, ".neo-vision", "bridge-profile");
-
+      // Launch Chrome with the user's DEFAULT profile (real cookies, logins, history).
+      // --load-extension injects NeoVision into the session.
+      // If Chrome is already running, this opens a new window in the existing instance
+      // and the extension (if already installed) should connect.
       console.error(`[NeoVision Bridge] Auto-launching Chrome with extension...`);
       console.error(`[NeoVision Bridge]   Chrome: ${chromeBin}`);
       console.error(`[NeoVision Bridge]   Extension: ${this.extensionPath}`);
 
       this.chromeProcess = spawn(chromeBin, [
         `--load-extension=${this.extensionPath}`,
-        `--user-data-dir=${profileDir}`,
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-default-apps",
         "about:blank",
       ], {
         detached: true,
@@ -115,13 +111,16 @@ export class ChromeBridge {
         console.error(`[NeoVision Bridge] Chrome launch failed:`, err);
       });
 
-      // Wait for extension to connect (up to 15 seconds)
-      const connected = await this.waitForExtension(15000);
+      // Wait for extension to connect (up to 20 seconds — default profile may take longer to load)
+      const connected = await this.waitForExtension(20000);
       if (!connected) {
-        throw new Error("Chrome launched but extension did not connect within 15 seconds.");
+        throw new Error(
+          "Chrome launched but extension did not connect within 20 seconds. " +
+          "If Chrome was already running, the extension may need to be reloaded at chrome://extensions."
+        );
       }
 
-      console.error(`[NeoVision Bridge] Chrome extension connected automatically.`);
+      console.error(`[NeoVision Bridge] Chrome extension connected (real Chrome profile).`);
     } finally {
       this.autoLaunching = false;
     }
