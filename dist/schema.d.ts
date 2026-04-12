@@ -9,7 +9,7 @@ export declare const PublicSnapshotInput: z.ZodObject<{
     verbosity: z.ZodDefault<z.ZodEnum<["actionable", "landmarks", "all"]>>;
     max_elements: z.ZodDefault<z.ZodNumber>;
     compact: z.ZodDefault<z.ZodBoolean>;
-    output_format: z.ZodDefault<z.ZodEnum<["compact", "agent"]>>;
+    output_format: z.ZodDefault<z.ZodEnum<["compact", "agent", "summary"]>>;
 }, "strip", z.ZodTypeAny, {
     verbosity: "actionable" | "landmarks" | "all";
     viewport_width: number;
@@ -19,7 +19,7 @@ export declare const PublicSnapshotInput: z.ZodObject<{
     max_depth: number;
     max_elements: number;
     compact: boolean;
-    output_format: "compact" | "agent";
+    output_format: "compact" | "agent" | "summary";
     url?: string | undefined;
 }, {
     url?: string | undefined;
@@ -31,7 +31,7 @@ export declare const PublicSnapshotInput: z.ZodObject<{
     max_depth?: number | undefined;
     max_elements?: number | undefined;
     compact?: boolean | undefined;
-    output_format?: "compact" | "agent" | undefined;
+    output_format?: "compact" | "agent" | "summary" | undefined;
 }>;
 export type PublicSnapshotInput = z.infer<typeof PublicSnapshotInput>;
 export declare const ClickInput: z.ZodObject<{
@@ -86,6 +86,7 @@ export declare const QueryInput: z.ZodObject<{
     role: z.ZodOptional<z.ZodString>;
     tag: z.ZodOptional<z.ZodString>;
     label_contains: z.ZodOptional<z.ZodString>;
+    text_contains: z.ZodOptional<z.ZodString>;
     region: z.ZodOptional<z.ZodObject<{
         x: z.ZodNumber;
         y: z.ZodNumber;
@@ -108,6 +109,7 @@ export declare const QueryInput: z.ZodObject<{
     role?: string | undefined;
     tag?: string | undefined;
     label_contains?: string | undefined;
+    text_contains?: string | undefined;
     region?: {
         x: number;
         y: number;
@@ -118,6 +120,7 @@ export declare const QueryInput: z.ZodObject<{
     role?: string | undefined;
     tag?: string | undefined;
     label_contains?: string | undefined;
+    text_contains?: string | undefined;
     region?: {
         x: number;
         y: number;

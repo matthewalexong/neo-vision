@@ -3,6 +3,7 @@ export interface QueryFilters {
     role?: string;
     tag?: string;
     labelContains?: string;
+    textContains?: string;
     region?: Bounds;
     actionableOnly?: boolean;
 }

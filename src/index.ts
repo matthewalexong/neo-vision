@@ -42,6 +42,11 @@ export type {
 // ─── Chrome Bridge (extension-based browser control) ───────────────
 export { ChromeBridge, type BridgeConfig } from "./bridge.js";
 
+// ─── Hub-and-Spoke (daemon + HTTP API + queue) ──────────────────
+export { RequestQueue, type QueueStats, type QueuedRequest } from "./queue.js";
+export { HttpApi, type HttpApiConfig } from "./http-api.js";
+export { HttpClient, type HttpClientConfig } from "./http-client.js";
+
 // ─── Pacing (human-like throttling for scraping) ─────────────────
 export {
   PacingEngine,

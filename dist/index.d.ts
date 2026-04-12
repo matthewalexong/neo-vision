@@ -19,5 +19,8 @@ export type { SpatialMap, SpatialElement, SpatialMapStats, Bounds, Point, Comput
 export { INJECTABLE_SOURCE, getInjectableScript, getInjectableInstaller, } from "./injectable.js";
 export type { InjectableSpatialMap, InjectableSpatialElement, InjectableBounds, InjectablePoint, InjectableOptions, } from "./injectable.js";
 export { ChromeBridge, type BridgeConfig } from "./bridge.js";
+export { RequestQueue, type QueueStats, type QueuedRequest } from "./queue.js";
+export { HttpApi, type HttpApiConfig } from "./http-api.js";
+export { HttpClient, type HttpClientConfig } from "./http-client.js";
 export { PacingEngine, getCaptchaDetector, CAPTCHA_DETECTOR_SOURCE, } from "./pacing.js";
 export type { PacingConfig, PacingInstruction, PacingStats, } from "./pacing.js";

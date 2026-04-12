@@ -16,6 +16,11 @@ export function queryMap(map, filters) {
         elements = elements.filter((el) => (el.label && el.label.toLowerCase().includes(search)) ||
             (el.text && el.text.toLowerCase().includes(search)));
     }
+    if (filters.textContains) {
+        const search = filters.textContains.toLowerCase();
+        elements = elements.filter((el) => (el.text && el.text.toLowerCase().includes(search)) ||
+            (el.label && el.label.toLowerCase().includes(search)));
+    }
     if (filters.region) {
         const r = filters.region;
         elements = elements.filter((el) => {

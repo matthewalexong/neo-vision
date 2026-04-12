@@ -82,6 +82,18 @@ export declare class ChromeBridge {
     getPageInfo(tabId?: number): Promise<any>;
     /** Get page text content */
     getPageText(tabId?: number): Promise<any>;
+    /** Reload the Chrome extension (self-heal mechanism).
+     *  Sends reload_extension command — the extension reloads itself and reconnects.
+     *  Used when the extension's WebSocket connection to the bridge is stale. */
+    reloadExtension(): Promise<{
+        reloading: boolean;
+    }>;
+    /** Check if the bridge and extension are both connected. */
+    getStatus(): {
+        bridge: boolean;
+        extension: boolean;
+        port: number;
+    };
     /** Stop the bridge server and any auto-launched Chrome */
     stop(): Promise<void>;
 }

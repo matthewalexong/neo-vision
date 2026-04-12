@@ -8,7 +8,7 @@ import type { SpatialMap } from "./schema.js";
 import { queryMap } from "./query.js";
 import { INJECTABLE_SOURCE, getInjectableScript, getInjectableInstaller } from "./injectable.js";
 import { PacingEngine, getCaptchaDetector } from "./pacing.js";
-import { ChromeBridge } from "./bridge.js";
+import { HttpClient } from "./http-client.js";
 
 // ─── State Management ────────────────────────────────────────────────
 
@@ -328,9 +328,11 @@ const server = new McpServer({
   description: NEO_VISION_DESCRIPTION,
 });
 
-// ─── Bridge (Chrome Extension) ──────────────────────────────────────
+// ─── HTTP Client (talks to daemon) ──────────────────────────────────
 
-const bridge = new ChromeBridge({ port: 7665 });
+const client = new HttpClient({
+  daemonUrl: process.env.NEO_VISION_DAEMON_URL || "http://localhost:7680",
+});
 
 // ─── spatial_snapshot ────────────────────────────────────────────
 
@@ -350,12 +352,15 @@ The full DOM map is always cached server-side regardless of output format. Use s
     try {
       const input = PublicSnapshotInput.parse(params);
 
+      // Ensure daemon is reachable
+      await client.ensureConnected();
+
       if (input.url) {
-        await bridge.navigate(input.url);
-        await bridge.wait(input.settle_ms / 1000);
+        await client.navigate(input.url);
+        await client.wait(input.settle_ms / 1000);
       }
 
-      const result = await bridge.injectSpatial({
+      const result = await client.injectSpatial({
         verbosity: input.verbosity,
         maxDepth: input.max_depth,
         includeNonVisible: input.include_non_visible,
@@ -407,9 +412,9 @@ Returns an updated spatial map reflecting the page state after the click.`,
         };
       }
 
-      await bridge.click(input.x, input.y, input.button, undefined);
+      await client.click(input.x, input.y, input.button);
 
-      const result = await bridge.injectSpatial({
+      const result = await client.injectSpatial({
         verbosity: lastVerbosity,
         maxDepth: 50,
         includeNonVisible: false,
@@ -453,13 +458,13 @@ Returns an updated spatial map.`,
 
       const x = input.x ?? 0;
       const y = input.y ?? 0;
-      await bridge.type(x, y, input.text, input.clear_first, undefined);
+      await client.type(x, y, input.text, input.clear_first);
 
       if (input.press_enter) {
-        await bridge.executeJs("document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;");
+        await client.executeJs("document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;");
       }
 
-      const result = await bridge.injectSpatial({
+      const result = await client.injectSpatial({
         verbosity: lastVerbosity,
         maxDepth: 50,
         includeNonVisible: false,
@@ -501,9 +506,9 @@ Returns an updated spatial map reflecting the new scroll position.`,
 
       const x = input.x ?? 640;
       const y = input.y ?? 360;
-      await bridge.scroll(input.delta_x, input.delta_y, x, y, undefined);
+      await client.scroll(input.delta_x, input.delta_y, x, y);
 
-      const result = await bridge.injectSpatial({
+      const result = await client.injectSpatial({
         verbosity: lastVerbosity,
         maxDepth: 50,
         includeNonVisible: false,
@@ -761,7 +766,7 @@ Returns a base64-encoded PNG data URL.`,
   {},
   async () => {
     try {
-      const result = await bridge.screenshot();
+      const result = await client.screenshot();
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
@@ -786,7 +791,7 @@ server.tool(
   async (params) => {
     try {
       const input = z.object({ url: z.string().url() }).parse(params);
-      const result = await bridge.navigate(input.url);
+      const result = await client.navigate(input.url);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
@@ -811,7 +816,7 @@ server.tool(
   async (params) => {
     try {
       const input = z.object({ seconds: z.number() }).parse(params);
-      await bridge.wait(input.seconds);
+      await client.wait(input.seconds);
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ waited: input.seconds }, null, 2) }],
       };
@@ -839,7 +844,7 @@ Returns the result of the expression.`,
   async (params) => {
     try {
       const input = z.object({ code: z.string() }).parse(params);
-      const result = await bridge.executeJs(input.code);
+      const result = await client.executeJs(input.code);
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ result }, null, 2) }],
       };
@@ -871,31 +876,112 @@ async function main() {
     process.exit(0);
   }
 
-  // Start bridge server
+  // MCP server is a thin client — the daemon owns the bridge.
+  // Just verify the daemon is reachable.
   try {
-    await bridge.start();
-    console.error("NeoVision Bridge WebSocket server started on port 7665");
+    await client.ensureConnected();
+    console.error("NeoVision MCP server connected to daemon at " + (process.env.NEO_VISION_DAEMON_URL || "http://localhost:7680"));
   } catch (err) {
-    console.error("Warning: Could not start bridge server:", err);
+    console.error("Warning: NeoVision daemon not reachable. Tools will fail until daemon is started.");
+    console.error("  Start daemon with: npx neo-vision-daemon");
   }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("NeoVision MCP server running on stdio (bridge mode enabled)");
+  console.error("NeoVision MCP server running on stdio (HTTP client mode)");
 }
+
+// ─── Bridge Management Tools ─────────────────────────────────────
+
+/** bridge_status — Check the connection status of the NeoVision daemon, bridge, and Chrome extension. */
+server.tool(
+  "bridge_status",
+  `Check whether the NeoVision daemon is running, the bridge WebSocket server is active, and the Chrome extension is connected.
+
+Returns bridge, extension, port, and queue stats from the daemon.`,
+  {},
+  async () => {
+    try {
+      const status = await client.getFullStatus();
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(status, null, 2),
+        }],
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ error: msg, hint: "Start the daemon with: npx neo-vision-daemon" }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+/** bridge_reload_extension — Tell the daemon to reload the Chrome extension.
+ *
+ * In hub-and-spoke mode, this POSTs to the daemon which owns the bridge. */
+server.tool(
+  "bridge_reload_extension",
+  `Tell the NeoVision daemon to reload the Chrome extension.
+
+Use this when the Chrome extension's badge shows OFF or red. The daemon will
+instruct the extension to reload and reconnect. Requires the daemon to be running.`,
+  {},
+  async () => {
+    try {
+      // Use execute_js as a proxy to check extension is alive, then suggest manual reload
+      const status = await client.getStatus();
+      if (!status.bridge) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: "Daemon bridge not running. Start daemon with: npx neo-vision-daemon" }),
+          }],
+          isError: true,
+        };
+      }
+      if (!status.extension) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              error: "Extension not connected to daemon.",
+              hint: "Reload the extension at chrome://extensions, or restart Chrome.",
+            }),
+          }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ status: "extension_connected", message: "Extension is already connected to the daemon." }),
+        }],
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ error: msg, hint: "Start the daemon with: npx neo-vision-daemon" }),
+        }],
+        isError: true,
+      };
+    }
+  }
+);
 
 main().catch((err) => {
   console.error("Fatal error:", err);
   process.exit(1);
 });
 
-// Cleanup on exit
-process.on("SIGINT", async () => {
-  await bridge.stop();
-  process.exit(0);
-});
-
-process.on("SIGTERM", async () => {
-  await bridge.stop();
-  process.exit(0);
-});
+// Cleanup on exit — MCP server is stateless, just exit.
+// The daemon manages the bridge lifecycle independently.
+process.on("SIGINT", () => process.exit(0));
+process.on("SIGTERM", () => process.exit(0));

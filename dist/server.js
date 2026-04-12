@@ -6,7 +6,7 @@ import { PublicSnapshotInput, ClickInput, TypeInput, ScrollInput, QueryInput } f
 import { queryMap } from "./query.js";
 import { INJECTABLE_SOURCE, getInjectableScript, getInjectableInstaller } from "./injectable.js";
 import { PacingEngine, getCaptchaDetector } from "./pacing.js";
-import { ChromeBridge } from "./bridge.js";
+import { HttpClient } from "./http-client.js";
 // ─── State Management ────────────────────────────────────────────────
 let lastSnapshot = null;
 let lastMaxElements = 2000;
@@ -172,6 +172,81 @@ function formatSnapshot(snapshot, maxElements, compact, outputFormat = "compact"
     if (outputFormat === "agent") {
         return formatAgentSnapshot(snapshot, maxElements);
     }
+    if (outputFormat === "summary") {
+        const { width: vw, height: vh } = snapshot.viewport;
+        const { x: sx, y: sy } = snapshot.scroll;
+        const pageH = snapshot.page_bounds.height;
+        const pageW = snapshot.page_bounds.width;
+        const effectiveVw = Math.min(vw, pageW);
+        const effectiveVh = Math.min(vh, pageH);
+        const vX1 = sx, vY1 = sy;
+        const vX2 = sx + effectiveVw, vY2 = sy + effectiveVh;
+        function inViewport(el) {
+            if (el.click_center) {
+                const cx = el.click_center.x, cy = el.click_center.y;
+                return cx >= vX1 && cx < vX2 && cy >= vY1 && cy < vY2;
+            }
+            const cX = el.bounds.x + el.bounds.width / 2;
+            const cY = el.bounds.y + el.bounds.height / 2;
+            return cX >= vX1 && cX < vX2 && cY >= vY1 && cY < vY2;
+        }
+        // Extract title: prefer <title>, then h1, then URL
+        let title = snapshot.url;
+        for (const el of snapshot.elements) {
+            if (el.tag === "title" && el.text) {
+                title = el.text;
+                break;
+            }
+        }
+        if (title === snapshot.url) {
+            for (const el of snapshot.elements) {
+                if (el.role === "heading" && el.tag === "h1" && el.text) {
+                    title = el.text;
+                    break;
+                }
+            }
+        }
+        // Headings: first 15 elements with role containing "heading"
+        const headings = snapshot.elements
+            .filter((el) => el.role && el.role.toLowerCase().includes("heading"))
+            .slice(0, 15)
+            .map((el) => ({
+            idx: el.idx,
+            tag: el.tag,
+            role: el.role,
+            label: el.label,
+            text: el.text,
+            click_center: el.click_center,
+        }));
+        // Top interactive: first 15 actionable elements in viewport
+        const topInteractive = snapshot.elements
+            .filter((el) => el.actionable && el.click_center && inViewport(el))
+            .slice(0, 15)
+            .map((el) => ({
+            idx: el.idx,
+            tag: el.tag,
+            role: el.role,
+            label: el.label,
+            text: el.text,
+            click_center: el.click_center,
+        }));
+        return JSON.stringify({
+            url: snapshot.url,
+            title,
+            timestamp: snapshot.timestamp,
+            viewport: snapshot.viewport,
+            scroll: snapshot.scroll,
+            page_bounds: snapshot.page_bounds,
+            stats: {
+                total_elements: snapshot.stats.total_elements,
+                actionable_elements: snapshot.stats.actionable_elements,
+                focusable_elements: snapshot.stats.focusable_elements,
+            },
+            landmarks: headings,
+            top_interactive: topInteractive,
+            hint: "Full snapshot cached in server memory. Use spatial_query to search by role, tag, text, or region.",
+        }, null, 2);
+    }
     const totalElements = snapshot.elements.length;
     const truncated = totalElements > maxElements;
     const elements = truncated ? snapshot.elements.slice(0, maxElements) : snapshot.elements;
@@ -215,23 +290,29 @@ const server = new McpServer({
     version: "0.3.0",
     description: NEO_VISION_DESCRIPTION,
 });
-// ─── Bridge (Chrome Extension) ──────────────────────────────────────
-const bridge = new ChromeBridge({ port: 7665 });
+// ─── HTTP Client (talks to daemon) ──────────────────────────────────
+const client = new HttpClient({
+    daemonUrl: process.env.NEO_VISION_DAEMON_URL || "http://localhost:7680",
+});
 // ─── spatial_snapshot ────────────────────────────────────────────
 server.tool("spatial_snapshot", `Navigate to a URL and return a spatial map of the page via the Chrome extension bridge.
 
 **Output modes** (controlled by output_format parameter):
   - 'compact' (default): Returns every visible element with pixel coordinates, ARIA roles, accessible labels, and actionability flags.
   - 'agent': Optimized for AI agent context windows. Returns deduplicated readable page text + only interactive/viewport-scoped elements.
+  - 'summary': Stores full map in server memory, returns only a lightweight receipt with page title, stats, key landmarks (headings), and top 15 interactive elements. Best for context-window efficiency — use spatial_query to drill into the cached data by role, tag, text, or region.
 
-The browser session persists across calls. Calling this again with a different URL navigates to that URL.`, PublicSnapshotInput.shape, async (params) => {
+The browser session persists across calls. Calling this again with a different URL navigates to that URL.
+The full DOM map is always cached server-side regardless of output format. Use spatial_query to search the cached map without re-snapshotting.`, PublicSnapshotInput.shape, async (params) => {
     try {
         const input = PublicSnapshotInput.parse(params);
+        // Ensure daemon is reachable
+        await client.ensureConnected();
         if (input.url) {
-            await bridge.navigate(input.url);
-            await bridge.wait(input.settle_ms / 1000);
+            await client.navigate(input.url);
+            await client.wait(input.settle_ms / 1000);
         }
-        const result = await bridge.injectSpatial({
+        const result = await client.injectSpatial({
             verbosity: input.verbosity,
             maxDepth: input.max_depth,
             includeNonVisible: input.include_non_visible,
@@ -266,8 +347,8 @@ Returns an updated spatial map reflecting the page state after the click.`, Clic
                 isError: true,
             };
         }
-        await bridge.click(input.x, input.y, input.button, undefined);
-        const result = await bridge.injectSpatial({
+        await client.click(input.x, input.y, input.button);
+        const result = await client.injectSpatial({
             verbosity: lastVerbosity,
             maxDepth: 50,
             includeNonVisible: false,
@@ -301,11 +382,11 @@ Returns an updated spatial map.`, TypeInput.shape, async (params) => {
         }
         const x = input.x ?? 0;
         const y = input.y ?? 0;
-        await bridge.type(x, y, input.text, input.clear_first, undefined);
+        await client.type(x, y, input.text, input.clear_first);
         if (input.press_enter) {
-            await bridge.executeJs("document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;");
+            await client.executeJs("document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;");
         }
-        const result = await bridge.injectSpatial({
+        const result = await client.injectSpatial({
             verbosity: lastVerbosity,
             maxDepth: 50,
             includeNonVisible: false,
@@ -337,8 +418,8 @@ Returns an updated spatial map reflecting the new scroll position.`, ScrollInput
         }
         const x = input.x ?? 640;
         const y = input.y ?? 360;
-        await bridge.scroll(input.delta_x, input.delta_y, x, y, undefined);
-        const result = await bridge.injectSpatial({
+        await client.scroll(input.delta_x, input.delta_y, x, y);
+        const result = await client.injectSpatial({
             verbosity: lastVerbosity,
             maxDepth: 50,
             includeNonVisible: false,
@@ -372,6 +453,7 @@ Requires a prior spatial_snapshot call (uses the cached map).`, QueryInput.shape
             role: input.role,
             tag: input.tag,
             labelContains: input.label_contains,
+            textContains: input.text_contains,
             region: input.region,
             actionableOnly: input.actionable_only,
         });
@@ -551,7 +633,7 @@ server.tool("spatial_screenshot", `Take a screenshot of the current page in the 
 
 Returns a base64-encoded PNG data URL.`, {}, async () => {
     try {
-        const result = await bridge.screenshot();
+        const result = await client.screenshot();
         return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -570,7 +652,7 @@ server.tool("spatial_navigate", `Navigate to a URL without taking a snapshot. Li
 }, async (params) => {
     try {
         const input = z.object({ url: z.string().url() }).parse(params);
-        const result = await bridge.navigate(input.url);
+        const result = await client.navigate(input.url);
         return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -589,7 +671,7 @@ server.tool("spatial_wait", `Wait for a specified duration.`, {
 }, async (params) => {
     try {
         const input = z.object({ seconds: z.number() }).parse(params);
-        await bridge.wait(input.seconds);
+        await client.wait(input.seconds);
         return {
             content: [{ type: "text", text: JSON.stringify({ waited: input.seconds }, null, 2) }],
         };
@@ -611,7 +693,7 @@ Returns the result of the expression.`, {
 }, async (params) => {
     try {
         const input = z.object({ code: z.string() }).parse(params);
-        const result = await bridge.executeJs(input.code);
+        const result = await client.executeJs(input.code);
         return {
             content: [{ type: "text", text: JSON.stringify({ result }, null, 2) }],
         };
@@ -641,29 +723,100 @@ async function main() {
         }
         process.exit(0);
     }
-    // Start bridge server
+    // MCP server is a thin client — the daemon owns the bridge.
+    // Just verify the daemon is reachable.
     try {
-        await bridge.start();
-        console.error("NeoVision Bridge WebSocket server started on port 7665");
+        await client.ensureConnected();
+        console.error("NeoVision MCP server connected to daemon at " + (process.env.NEO_VISION_DAEMON_URL || "http://localhost:7680"));
     }
     catch (err) {
-        console.error("Warning: Could not start bridge server:", err);
+        console.error("Warning: NeoVision daemon not reachable. Tools will fail until daemon is started.");
+        console.error("  Start daemon with: npx neo-vision-daemon");
     }
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("NeoVision MCP server running on stdio (bridge mode enabled)");
+    console.error("NeoVision MCP server running on stdio (HTTP client mode)");
 }
+// ─── Bridge Management Tools ─────────────────────────────────────
+/** bridge_status — Check the connection status of the NeoVision daemon, bridge, and Chrome extension. */
+server.tool("bridge_status", `Check whether the NeoVision daemon is running, the bridge WebSocket server is active, and the Chrome extension is connected.
+
+Returns bridge, extension, port, and queue stats from the daemon.`, {}, async () => {
+    try {
+        const status = await client.getFullStatus();
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify(status, null, 2),
+                }],
+        };
+    }
+    catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify({ error: msg, hint: "Start the daemon with: npx neo-vision-daemon" }, null, 2),
+                }],
+            isError: true,
+        };
+    }
+});
+/** bridge_reload_extension — Tell the daemon to reload the Chrome extension.
+ *
+ * In hub-and-spoke mode, this POSTs to the daemon which owns the bridge. */
+server.tool("bridge_reload_extension", `Tell the NeoVision daemon to reload the Chrome extension.
+
+Use this when the Chrome extension's badge shows OFF or red. The daemon will
+instruct the extension to reload and reconnect. Requires the daemon to be running.`, {}, async () => {
+    try {
+        // Use execute_js as a proxy to check extension is alive, then suggest manual reload
+        const status = await client.getStatus();
+        if (!status.bridge) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({ error: "Daemon bridge not running. Start daemon with: npx neo-vision-daemon" }),
+                    }],
+                isError: true,
+            };
+        }
+        if (!status.extension) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            error: "Extension not connected to daemon.",
+                            hint: "Reload the extension at chrome://extensions, or restart Chrome.",
+                        }),
+                    }],
+                isError: true,
+            };
+        }
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify({ status: "extension_connected", message: "Extension is already connected to the daemon." }),
+                }],
+        };
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify({ error: msg, hint: "Start the daemon with: npx neo-vision-daemon" }),
+                }],
+            isError: true,
+        };
+    }
+});
 main().catch((err) => {
     console.error("Fatal error:", err);
     process.exit(1);
 });
-// Cleanup on exit
-process.on("SIGINT", async () => {
-    await bridge.stop();
-    process.exit(0);
-});
-process.on("SIGTERM", async () => {
-    await bridge.stop();
-    process.exit(0);
-});
+// Cleanup on exit — MCP server is stateless, just exit.
+// The daemon manages the bridge lifecycle independently.
+process.on("SIGINT", () => process.exit(0));
+process.on("SIGTERM", () => process.exit(0));
 //# sourceMappingURL=server.js.map

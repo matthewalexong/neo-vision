@@ -19,6 +19,10 @@ export { queryMap } from "./query.js";
 export { INJECTABLE_SOURCE, getInjectableScript, getInjectableInstaller, } from "./injectable.js";
 // ─── Chrome Bridge (extension-based browser control) ───────────────
 export { ChromeBridge } from "./bridge.js";
+// ─── Hub-and-Spoke (daemon + HTTP API + queue) ──────────────────
+export { RequestQueue } from "./queue.js";
+export { HttpApi } from "./http-api.js";
+export { HttpClient } from "./http-client.js";
 // ─── Pacing (human-like throttling for scraping) ─────────────────
 export { PacingEngine, getCaptchaDetector, CAPTCHA_DETECTOR_SOURCE, } from "./pacing.js";
 //# sourceMappingURL=index.js.map

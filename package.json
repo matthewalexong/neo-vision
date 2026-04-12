@@ -1,6 +1,6 @@
 {
   "name": "neo-vision",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "See the web the way Neo sees the Matrix. Deterministic spatial maps of web pages for AI agent navigation — pixel-precise coordinates, ARIA roles, actionability flags, and a built-in stealth layer that defeats anti-bot detection.",
   "type": "module",
   "main": "dist/index.js",
@@ -17,15 +17,22 @@
     "./server": {
       "import": "./dist/server.js",
       "types": "./dist/server.d.ts"
+    },
+    "./daemon": {
+      "import": "./dist/daemon.js",
+      "types": "./dist/daemon.d.ts"
     }
   },
   "bin": {
-    "neo-vision": "./dist/server.js"
+    "neo-vision": "./dist/server.js",
+    "neo-vision-daemon": "./dist/daemon.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
+    "daemon": "node dist/daemon.js",
+    "dev:daemon": "tsx src/daemon.ts",
     "prepublishOnly": "npm run build",
     "postinstall": "echo '\\n  NeoVision installed! Run: npx neo-vision --setup\\n  Or see: https://github.com/matthewalexong/neo-vision#bridge\\n'"
   },

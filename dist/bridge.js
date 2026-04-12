@@ -16,7 +16,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { getInjectableScript } from "./injectable.js";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { resolve, dirname, join } from "path";
+import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 export class ChromeBridge {
     wss = null;
@@ -73,20 +73,17 @@ export class ChromeBridge {
             if (!chromeBin) {
                 throw new Error("Chrome not found. Install Google Chrome to use bridge tools.");
             }
-            // Check if Chrome is already running — if so, we can't use --load-extension
-            // because Chrome only allows one instance per user-data-dir.
-            // Use a dedicated NeoVision profile to avoid conflicts with the user's main Chrome.
-            const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
-            const profileDir = join(homeDir, ".neo-vision", "bridge-profile");
+            // Launch Chrome with the user's DEFAULT profile (real cookies, logins, history).
+            // --load-extension injects NeoVision into the session.
+            // If Chrome is already running, this opens a new window in the existing instance
+            // and the extension (if already installed) should connect.
             console.error(`[NeoVision Bridge] Auto-launching Chrome with extension...`);
             console.error(`[NeoVision Bridge]   Chrome: ${chromeBin}`);
             console.error(`[NeoVision Bridge]   Extension: ${this.extensionPath}`);
             this.chromeProcess = spawn(chromeBin, [
                 `--load-extension=${this.extensionPath}`,
-                `--user-data-dir=${profileDir}`,
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--disable-default-apps",
                 "about:blank",
             ], {
                 detached: true,
@@ -97,12 +94,13 @@ export class ChromeBridge {
             this.chromeProcess.on("error", (err) => {
                 console.error(`[NeoVision Bridge] Chrome launch failed:`, err);
             });
-            // Wait for extension to connect (up to 15 seconds)
-            const connected = await this.waitForExtension(15000);
+            // Wait for extension to connect (up to 20 seconds — default profile may take longer to load)
+            const connected = await this.waitForExtension(20000);
             if (!connected) {
-                throw new Error("Chrome launched but extension did not connect within 15 seconds.");
+                throw new Error("Chrome launched but extension did not connect within 20 seconds. " +
+                    "If Chrome was already running, the extension may need to be reloaded at chrome://extensions.");
             }
-            console.error(`[NeoVision Bridge] Chrome extension connected automatically.`);
+            console.error(`[NeoVision Bridge] Chrome extension connected (real Chrome profile).`);
         }
         finally {
             this.autoLaunching = false;
@@ -366,7 +364,32 @@ export class ChromeBridge {
     }
     /** Get page text content */
     async getPageText(tabId) {
-        return this.send("get_page_text", { tabId });
+        return this.send("get_page_info", { tabId });
+    }
+    /** Reload the Chrome extension (self-heal mechanism).
+     *  Sends reload_extension command — the extension reloads itself and reconnects.
+     *  Used when the extension's WebSocket connection to the bridge is stale. */
+    async reloadExtension() {
+        if (!this.ready) {
+            // Not connected — extension can't reload itself, just return status
+            return { reloading: false };
+        }
+        try {
+            const result = await this.send("reload_extension", {}, 10000);
+            return result;
+        }
+        catch (err) {
+            // Extension reloaded before responding — that's fine
+            return { reloading: true };
+        }
+    }
+    /** Check if the bridge and extension are both connected. */
+    getStatus() {
+        return {
+            bridge: this.wss !== null,
+            extension: this._ready && this.extension !== null && this.extension.readyState === WebSocket.OPEN,
+            port: this.port,
+        };
     }
     /** Stop the bridge server and any auto-launched Chrome */
     async stop() {
