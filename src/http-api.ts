@@ -165,8 +165,9 @@ export class HttpApi {
         return snapshot;
       });
 
-      // Cache for /api/query
-      this.lastSnapshot = result as SpatialMap;
+      // Cache for /api/query — unwrap spatial_map if bridge returns wrapper
+      const snapshot = (result as any)?.spatial_map ?? result;
+      this.lastSnapshot = snapshot as SpatialMap;
 
       this.sendJson(res, 200, { ok: true, data: result });
     } catch (err) {
