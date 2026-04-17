@@ -41,6 +41,10 @@ export class ChromeBridge {
   private chromeProcess: ReturnType<typeof spawn> | null = null;
   private autoLaunching = false;
   private extensionPath: string;
+  _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _reconnectAttempts = 0;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 3;
+  private static readonly RECONNECT_DELAY_MS = 10_000;
 
   constructor(config: BridgeConfig = {}) {
     this.port = config.port || 7665;
@@ -276,15 +280,9 @@ export class ChromeBridge {
         ws.on("close", () => {
           clearTimeout(identifyTimeout);
           if (ws === this.extension) {
-            console.error("[NeoVision Bridge] Chrome extension disconnected");
             this.extension = null;
             this._ready = false;
-            // Reject all pending requests
-            for (const [id, req] of this.pendingRequests) {
-              clearTimeout(req.timer);
-              req.reject(new Error("Extension disconnected"));
-            }
-            this.pendingRequests.clear();
+            this._handleExtensionDisconnect();
           } else {
             this.externalClients.delete(ws);
             console.error("[NeoVision Bridge] External client disconnected");
@@ -420,13 +418,45 @@ export class ChromeBridge {
     return this.send("get_page_text", { tabId });
   }
 
+  /** Handle extension disconnect: reject pending requests and schedule reconnect */
+  _handleExtensionDisconnect(): void {
+    console.error("[NeoVision Bridge] Chrome extension disconnected");
+
+    for (const [, req] of this.pendingRequests) {
+      clearTimeout(req.timer);
+      req.reject(new Error("Extension disconnected"));
+    }
+    this.pendingRequests.clear();
+
+    if (this._reconnectAttempts >= ChromeBridge.MAX_RECONNECT_ATTEMPTS) {
+      console.error("[NeoVision Bridge] Max reconnect attempts reached — giving up.");
+      return;
+    }
+
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+
+    this._reconnectTimer = setTimeout(async () => {
+      this._reconnectTimer = null;
+      if (this.ready) return; // reconnected on its own
+      this._reconnectAttempts++;
+      console.error(
+        `[NeoVision Bridge] Reconnect attempt ${this._reconnectAttempts}/${ChromeBridge.MAX_RECONNECT_ATTEMPTS}...`
+      );
+      try {
+        await this.autoLaunchChrome();
+        if (this.ready) this._reconnectAttempts = 0; // reset on success
+      } catch (err) {
+        console.error("[NeoVision Bridge] Reconnect failed:", err);
+      }
+    }, ChromeBridge.RECONNECT_DELAY_MS);
+  }
+
   /** Stop the bridge server and any auto-launched Chrome */
   async stop() {
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     if (this.extension) this.extension.close();
     if (this.wss) this.wss.close();
     this._ready = false;
-    // Don't kill user's Chrome — they may have tabs open.
-    // Just release references. Chrome stays running independently.
     this.chromeProcess = null;
   }
 }

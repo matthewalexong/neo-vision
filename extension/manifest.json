@@ -8,7 +8,8 @@
     "tabs",
     "scripting",
     "tabGroups",
-    "alarms"
+    "alarms",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"

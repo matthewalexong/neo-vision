@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.neovision.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/matthewong/Documents/Claude/Projects/New Browser Variant/spatial-dom-map/dist/daemon.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/matthewong/Documents/Claude/Projects/New Browser Variant/spatial-dom-map</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/matthewong/.neo-vision/logs/daemon.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/matthewong/.neo-vision/logs/daemon-error.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

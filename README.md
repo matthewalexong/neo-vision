@@ -4,7 +4,7 @@
 
 Give your AI agent a pixel-precise JSON map of every element on a page — coordinates, ARIA roles, accessible labels, and actionability flags — without screenshots, without brittle CSS selectors, without getting blocked by anti-bot systems.
 
-**Version 0.5.0** · MIT License · [GitHub](https://github.com/matthewalexong/neo-vision)
+**Version 0.6.0** · MIT License · [GitHub](https://github.com/matthewalexong/neo-vision)
 
 ## The Problem
 
@@ -31,44 +31,21 @@ NeoVision asks the browser's own layout engine where everything is — because i
 ```
 
 No guessing. No hallucination. No selector that breaks tomorrow.
-The built-in **stealth layer** patches every major bot-detection vector (navigator.webdriver, WebGL fingerprint, plugin enumeration, permissions API) and the **attach mode** lets you drive the user's real Chrome — with real cookies, real fingerprint, real browsing history. Anti-bot systems see a real user because it _is_ a real browser.
+
+NeoVision drives the user's **real Chrome** via a Chrome extension — with real cookies, real fingerprint, real browsing history. Anti-bot systems see a real user because it _is_ a real browser.
 
 We tested this against the five most notoriously anti-bot sites on the web — **Ticketmaster**, **Nike**, **LinkedIn**, **Instagram**, and **Amazon** — plus **Discord** (Cloudflare). All six returned full page content with zero CAPTCHAs, zero bot walls, and zero detection signals. [Full test report →](STEALTH_TEST_REPORT.md)
 
 ## Quick Start
 
-### As a library (any agent harness)
+### 1. Install the NeoVision Chrome Extension
 
-```bash
-npm install neo-vision
-npx playwright install chromium
-```
+1. Open Chrome and go to `chrome://extensions`
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked** and select the `extension/` folder from this repo
+4. The NeoVision Bridge icon will appear in your toolbar
 
-```typescript
-import { SpatialBrowser } from 'neo-vision';
-
-const browser = new SpatialBrowser({ mode: 'stealth' });
-
-// Snapshot a page
-const map = await browser.snapshot('https://news.ycombinator.com');
-
-// Find all clickable links
-const links = map.elements.filter(e => e.role === 'link' && e.actionable);
-console.log(`Found ${links.length} links`);
-
-// Click the first one
-const updated = await browser.click(links[0].click_center!);
-
-// Type into a search box
-const search = map.elements.find(e => e.role === 'searchbox');
-if (search) await browser.type('AI news', search.click_center!);
-
-await browser.close();
-```
-
-### As an MCP server (Claude, Cursor, Windsurf, etc.)
-
-Add to your MCP config:
+### 2. Add to Your MCP Config
 
 ```json
 {
@@ -80,6 +57,9 @@ Add to your MCP config:
   }
 }
 ```
+
+The MCP server starts automatically. The Chrome extension connects to it via WebSocket. Once connected, all 15 spatial tools are available.
+
 ## MCP Tools
 
 NeoVision exposes **15 tools** through the MCP server, organized by function:
@@ -107,7 +87,7 @@ NeoVision exposes **15 tools** through the MCP server, organized by function:
 
 | Tool | Description |
 |------|-------------|
-| `spatial_get_injectable` | Get the NeoVision snapshot logic as injectable JavaScript for external browser contexts. Use this to inject NeoVision into Chrome extensions, DevTools console, bookmarklets, or any browser context outside Playwright. Returns a self-invoking script, an installer, or raw source. |
+| `spatial_get_injectable` | Get the NeoVision snapshot logic as injectable JavaScript for external browser contexts. Returns a self-invoking script, an installer, or raw source. |
 | `spatial_pace` | Human-like pacing manager for multi-page scraping sessions. Manages randomized delays, periodic breaks, CAPTCHA detection, and automatic slowdown. Prevents anti-bot pattern detection across long scraping runs. |
 
 ### Session Management
@@ -118,20 +98,37 @@ NeoVision exposes **15 tools** through the MCP server, organized by function:
 | `spatial_disconnect_cdp` | Release the CDP connection. The user's Chrome stays open. |
 | `spatial_import_cookies` | Import cookies into the browser session. Use to warm up sessions with cookies from the user's real browser for anti-bot bypass. |
 | `spatial_export_cookies` | Export cookies from the current browser session. Optionally filter by domain. |
-## Bridge Mode (Chrome Extension)
 
-NeoVision includes a Chrome extension (`extension/` directory) that enables **hybrid mode** — the most powerful anti-bot bypass available. Instead of launching a separate browser, NeoVision drives the user's real Chrome session with all their existing cookies, DataDome/Cloudflare trust scores, localStorage, and login sessions intact.
+## Architecture
 
-**How it works:**
+NeoVision uses an **extension-only architecture**:
 
-1. Install the NeoVision Chrome extension from the `extension/` directory
-2. The extension connects to the MCP server via WebSocket
-3. Use `spatial_connect_cdp` or the bridge tools to drive the real browser
-4. All spatial tools (snapshot, click, type, scroll) operate on the user's actual Chrome tabs
+```
+AI Agent ←→ MCP Server ←→ WebSocket Bridge ←→ Chrome Extension ←→ Real Chrome
+```
 
-**Why this matters:** Anti-bot systems like DataDome and Cloudflare don't just check browser fingerprints — they build trust scores over time based on browsing history, cookie age, and behavioral patterns. A freshly launched Playwright browser starts with zero trust. Bridge mode inherits the user's full trust score because it _is_ their browser.
+1. The MCP server runs as a local daemon (or via `npx neo-vision`)
+2. The Chrome extension connects to the MCP server over WebSocket on port 7665
+3. MCP tools send commands to the extension (navigate, snapshot, click, type, scroll)
+4. The extension executes them in real Chrome tabs and returns results
 
-The `spatial_get_injectable` tool is designed for this workflow — inject NeoVision's spatial snapshot logic into the real Chrome via the extension, get back a structured DOM map, then use the extension's click/type tools with the coordinates from the map.
+**Why this matters:** Anti-bot systems like DataDome and Cloudflare don't just check browser fingerprints — they build trust scores over time based on browsing history, cookie age, and behavioral patterns. A freshly launched headless browser starts with zero trust. NeoVision inherits the user's full trust score because it drives their actual Chrome session.
+
+### Auto-reconnect
+
+If the extension disconnects (e.g. Chrome restarts), the bridge automatically waits 10 seconds and attempts to relaunch Chrome with the extension. This retries up to 3 times before giving up, so brief disruptions are handled transparently.
+
+### Running as a Background Daemon
+
+For always-on usage, install the launchd plist to run the daemon at login:
+
+```bash
+mkdir -p ~/.neo-vision/logs
+cp ai.neovision.daemon.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/ai.neovision.daemon.plist
+```
+
+This starts `dist/daemon.js` at login, keeps it alive, and logs to `~/.neo-vision/logs/`.
 
 ## Output Formats
 
@@ -151,91 +148,8 @@ Optimized for AI agent context windows on text-dense pages (Wikipedia, Amazon, l
 - **_navigation** — hint with the exact `spatial_scroll` delta to advance to the next viewport
 
 Use agent mode on any page that returns 1000+ elements in compact mode, or when you need readable text content for research and summarization.
-## Browser Modes
 
-| Mode | What it does | Best for |
-|------|-------------|----------|
-| `bundled` | Headless Chromium with `--headless=new` (full browser, not headless shell), stealth patches, persistent profile | CI/CD, bulk scraping, environments without Chrome installed |
-| `stealth` | Launches your real Chrome install, headed, with stealth patches and persistent profile (**default**) | Best detection avoidance — real Chrome + real profile = indistinguishable from a human |
-| `attach` | Connects to already-running Chrome via CDP | Maximum stealth — your existing cookies, fingerprint, and history |
-
-**Persistent profile:** Both `bundled` and `stealth` modes store browser data in `~/.neo-vision/chrome-profile/` by default. This means cookies, localStorage, and browsing history persist across sessions — the browser looks like a real, long-lived install instead of a freshly spawned automation instance. This is critical for avoiding bot detection.
-
-**SingletonLock cleanup:** If the browser crashes, Chrome leaves a `SingletonLock` file in the profile directory that prevents new instances from launching. NeoVision automatically detects and removes stale lock files on startup, so crash recovery is seamless.
-
-**Anti-automation flags:** NeoVision strips `--enable-automation` (which Playwright normally injects) and adds `--disable-automation` and `--disable-blink-features=AutomationControlled` to prevent Chrome from exposing automation signals.
-
-**Realistic user agent:** Instead of Playwright's default UA string (which includes "HeadlessChrome"), NeoVision sets a real Chrome user agent with correct platform detection (e.g., MacIntel for macOS).
-
-```typescript
-// Stealth (default) — uses your real Chrome with persistent profile
-const browser = new SpatialBrowser({ mode: 'stealth' });
-
-// Bundled — headless but with --headless=new (less detectable than old headless)
-const browser = new SpatialBrowser({ mode: 'bundled' });
-
-// Attach — connect to running Chrome
-// First: google-chrome --remote-debugging-port=9222
-const browser = new SpatialBrowser({
-  mode: 'attach',
-  cdpUrl: 'http://localhost:9222'
-});
-```
-
-## Stealth Layer
-
-The built-in stealth module patches every major detection vector:
-
-| Vector | What we do |
-|--------|-----------|
-| `navigator.webdriver` | Removed (returns `undefined`) |
-| `window.chrome` | Present with runtime object |
-| WebGL renderer | Reports real GPU instead of SwiftShader |
-| Plugins array | Populated with standard Chrome plugins |
-| Permissions API | Returns consistent results |
-| `navigator.languages` | Populated with `['en-US', 'en']` |
-| `navigator.platform` | Reports real platform (MacIntel for macOS) |
-| CSS animations | Disabled for deterministic snapshots |
-| Human mouse movement | Bezier-curved paths with ease-in-out, randomized control points |
-| Click targeting | Jittered offset from element center (±3px radius) + hover pause |
-| Human typing | Variable 40–120ms per character, word-boundary pauses, 5% mid-word hesitation |
-| Human scrolling | Multi-tick wheel events with per-tick jitter, not instant jumps |
-| Timing jitter | All waits use `humanDelay()` with configurable jitter factor |
-
-Run the self-check:
-
-```bash
-npx tsx src/demo.ts --stealth-check
-```
 ## API Reference
-
-### `SpatialBrowser`
-
-```typescript
-const browser = new SpatialBrowser(options?: {
-  mode?: 'bundled' | 'stealth' | 'attach';
-  width?: number;        // viewport width, default 1280
-  height?: number;       // viewport height, default 720
-  zoom?: number;         // device scale factor, default 1.0
-  cdpUrl?: string;       // CDP URL for attach mode
-  chromePath?: string;   // Chrome binary path for stealth mode
-  stealth?: boolean;     // enable stealth patches
-});
-```
-
-#### Methods
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `snapshot(url, config?)` | `SpatialMap` | Navigate + snapshot |
-| `refresh(config?)` | `SpatialMap` | Re-snapshot current page |
-| `click(point, options?)` | `SpatialMap` | Click at coordinates |
-| `type(text, at?, options?)` | `SpatialMap` | Type text |
-| `scroll(deltaY, deltaX?, at?)` | `SpatialMap` | Scroll the page |
-| `query(filters)` | `SpatialMap` | Filter last snapshot in memory |
-| `wait(baseMs?)` | `void` | Human-paced sleep with jitter |
-| `checkStealth()` | `Record<string, boolean>` | Stealth self-check |
-| `close()` | `void` | Cleanup |
 
 ### `SpatialElement`
 
@@ -260,6 +174,7 @@ Each element in the map includes:
   }
 }
 ```
+
 ## How Determinism Works
 
 Given the same HTML + CSS + viewport size + zoom level, browsers produce identical pixel coordinates for every element. This is guaranteed by the W3C CSS specification — it's how browsers paint the screen.
@@ -270,7 +185,7 @@ NeoVision locks the viewport, device scale factor, locale, timezone, and scroll 
 
 - **AI agent navigation** — give your agent a coordinate system instead of asking it to guess
 - **Anti-bot-resistant data extraction** — extract structured data from sites that block headless browsers
-- **Hybrid browser automation** — drive the user's real Chrome via bridge mode for maximum stealth
+- **Real-browser automation** — drive the user's real Chrome with full session context
 - **Multi-page scraping** — use `spatial_pace` for human-like session management across hundreds of pages
 - **Accessibility auditing** — map every interactive element with its ARIA role and label
 - **Visual regression** — compare spatial maps across deploys to catch layout changes
@@ -278,20 +193,20 @@ NeoVision locks the viewport, device scale factor, locale, timezone, and scroll 
 
 ## Framework Integration
 
-Works with any agent framework:
+Works with any agent framework that supports MCP:
+
+```
+Claude Code / Cowork / Cursor / Windsurf / OpenClaw / AntiGravity
+→ Use the MCP server — it just works
+```
+
+For custom integrations, use the injectable script directly:
 
 ```typescript
-// LangChain / LangGraph
-import { SpatialBrowser } from 'neo-vision';
+import { getInjectableScript } from 'neo-vision/injectable';
 
-// CrewAI / AutoGen
-import { SpatialBrowser } from 'neo-vision';
-
-// Claude Code / Cowork / OpenClaw / AntiGravity
-// Use the MCP server — it just works
-
-// Raw Playwright
-import { applyStealthToContext, takeSnapshot } from 'neo-vision';
+const script = getInjectableScript({ verbosity: 'actionable' });
+// Inject into any browser context via CDP, extension, or DevTools console
 ```
 
 ## License
