@@ -127,7 +127,7 @@ export class HttpApi {
         lastSnapshot: this.lastSnapshot ? {
           url: this.lastSnapshot.url,
           timestamp: this.lastSnapshot.timestamp,
-          elements: this.lastSnapshot.elements.length,
+          elements: this.lastSnapshot.elements?.length ?? 0,
         } : null,
       },
     });

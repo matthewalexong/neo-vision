@@ -234,15 +234,37 @@ async function handleCommand(msg) {
           const el = document.elementFromPoint(x, y);
           if (!el) return { success: false, error: 'No element at coordinates' };
 
-          const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-          for (const eventType of events) {
-            const evt = new MouseEvent(eventType, {
-              clientX: x, clientY: y,
-              button: button === 'right' ? 2 : 0,
-              bubbles: true, cancelable: true, view: window
-            });
-            el.dispatchEvent(evt);
+          // Fire full event chain on the element
+          const fireEvents = (target) => {
+            const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+            for (const eventType of events) {
+              const evt = new MouseEvent(eventType, {
+                clientX: x, clientY: y,
+                button: button === 'right' ? 2 : 0,
+                bubbles: true, cancelable: true, view: window
+              });
+              target.dispatchEvent(evt);
+            }
+          };
+
+          fireEvents(el);
+
+          // For React apps (X, Facebook, etc.): also try .click() on the
+          // nearest button/anchor/[role=button] ancestor if the direct
+          // dispatch didn't trigger React's synthetic handler.
+          let reactTarget = el;
+          while (reactTarget && reactTarget !== document.body) {
+            if (reactTarget.tagName === 'BUTTON' || reactTarget.tagName === 'A' ||
+                reactTarget.getAttribute('role') === 'button' ||
+                reactTarget.dataset?.testid) {
+              if (reactTarget !== el) {
+                reactTarget.click();  // Native .click() often works better for React
+              }
+              break;
+            }
+            reactTarget = reactTarget.parentElement;
           }
+
           return {
             success: true,
             element: el.tagName.toLowerCase(),
@@ -262,24 +284,80 @@ async function handleCommand(msg) {
       const results = await chrome.scripting.executeScript({
         target: { tabId },
         func: (x, y, text, clearFirst) => {
-          const el = document.elementFromPoint(x, y);
+          let el = document.elementFromPoint(x, y);
           if (!el) return { success: false, error: 'No element at coordinates' };
 
-          el.focus();
-          if (clearFirst && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
-            el.value = '';
-            el.dispatchEvent(new Event('input', { bubbles: true }));
+          // Walk up to find the actual editable element.
+          // X.com, Slack, Notion, etc. use nested divs inside a contenteditable.
+          // elementFromPoint may return a child span/div that isn't editable itself.
+          let editable = el;
+          let found = false;
+
+          // Check if the element or any ancestor is contenteditable
+          let walk = el;
+          while (walk && walk !== document.body) {
+            if (walk.isContentEditable || walk.contentEditable === 'true') {
+              editable = walk;
+              found = true;
+              break;
+            }
+            if (walk.tagName === 'INPUT' || walk.tagName === 'TEXTAREA') {
+              editable = walk;
+              found = true;
+              break;
+            }
+            walk = walk.parentElement;
           }
 
-          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-            el.value = (clearFirst ? '' : el.value) + text;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          } else {
-            document.execCommand('insertText', false, text);
+          // Also check data-testid for X.com's compose box specifically
+          if (!found) {
+            const xCompose = document.querySelector('[data-testid="tweetTextarea_0"], [data-testid="tweetTextarea_0_label"], [role="textbox"][contenteditable="true"]');
+            if (xCompose) {
+              editable = xCompose;
+              found = true;
+            }
           }
 
-          return { success: true, element: el.tagName.toLowerCase() };
+          editable.focus();
+
+          // Small delay to let focus register on React apps
+          return new Promise(resolve => setTimeout(() => {
+            if (editable.tagName === 'INPUT' || editable.tagName === 'TEXTAREA') {
+              if (clearFirst) {
+                editable.value = '';
+                editable.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+              editable.value = (clearFirst ? '' : editable.value) + text;
+              editable.dispatchEvent(new Event('input', { bubbles: true }));
+              editable.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (editable.isContentEditable || editable.contentEditable === 'true') {
+              // Contenteditable: use execCommand for React/X.com compat
+              if (clearFirst) {
+                editable.textContent = '';
+                editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+              }
+              // Focus and place cursor at end
+              const range = document.createRange();
+              const sel = window.getSelection();
+              range.selectNodeContents(editable);
+              range.collapse(false);
+              sel.removeAllRanges();
+              sel.addRange(range);
+
+              // Insert text via execCommand (triggers React's onChange)
+              document.execCommand('insertText', false, text);
+            } else {
+              // Fallback: try execCommand anyway
+              document.execCommand('insertText', false, text);
+            }
+
+            resolve({
+              success: true,
+              element: editable.tagName.toLowerCase(),
+              contentEditable: editable.isContentEditable || false,
+              method: editable.isContentEditable ? 'execCommand' : 'value',
+            });
+          }, 100));
         },
         args: [x, y, text, clearFirst],
         world: 'MAIN'

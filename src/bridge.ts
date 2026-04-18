@@ -22,6 +22,12 @@ import { fileURLToPath } from "url";
 
 export interface BridgeConfig {
   port?: number;
+  /** Milliseconds to wait for a new connection to identify itself (default: 10000) */
+  identifyTimeoutMs?: number;
+  /** Milliseconds between heartbeat pings to the extension (default: 15000). 0 disables. */
+  heartbeatIntervalMs?: number;
+  /** How many consecutive missed pongs before declaring the connection dead (default: 2) */
+  heartbeatMaxMissed?: number;
 }
 
 interface PendingRequest {
@@ -323,6 +329,14 @@ export class ChromeBridge {
   /** Check if the extension is connected */
   get ready(): boolean {
     return this._ready && this.extension !== null && this.extension.readyState === WebSocket.OPEN;
+  }
+
+  getStatus(): { bridge: boolean; extension: boolean; port: number } {
+    return {
+      bridge: true,
+      extension: this.ready,
+      port: this.port,
+    };
   }
 
   /** Send a command to the extension and wait for a response.
