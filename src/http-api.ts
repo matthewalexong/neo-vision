@@ -18,6 +18,14 @@ import { RequestQueue, type QueueStats } from "./queue.js";
 import { queryMap } from "./query.js";
 import { getInjectableScript } from "./injectable.js";
 import type { SpatialMap } from "./schema.js";
+import {
+  osClick,
+  osType,
+  pageToScreen,
+  isCliclickInstalled,
+  stealthGap,
+  type WindowGeometry,
+} from "./os-input.js";
 
 export interface HttpApiConfig {
   port?: number;
@@ -106,6 +114,18 @@ export class HttpApi {
           return this.handleScreenshot(res);
         case "/api/query":
           return this.handleQuery(body, res);
+        case "/api/window_geometry":
+          return this.handleWindowGeometry(body, res);
+        case "/api/click_os":
+          return this.handleClickOs(body, res);
+        case "/api/type_os":
+          return this.handleTypeOs(body, res);
+        case "/api/list_tabs":
+          return this.handleListTabs(res);
+        case "/api/spawn_tab":
+          return this.handleSpawnTab(body, res);
+        case "/api/close_tab":
+          return this.handleCloseTab(body, res);
         default:
           return this.sendJson(res, 404, { ok: false, error: `Unknown route: POST ${url}` });
       }
@@ -138,7 +158,11 @@ export class HttpApi {
       return this.sendJson(res, 400, { ok: false, error: "Missing required field: url" });
     }
     try {
-      const result = await this.queue.enqueue(() => this.bridge.navigate(body.url));
+      const result = await this.queue.enqueue(
+        () => this.bridge.navigate(body.url, body.tabId),
+        60000,
+        body.tabId,
+      );
       this.sendJson(res, 200, { ok: true, data: result });
     } catch (err) {
       this.sendError(res, err);
@@ -232,9 +256,12 @@ export class HttpApi {
     if (!body.code) {
       return this.sendJson(res, 400, { ok: false, error: "Missing required field: code" });
     }
+    const world = body.world === "main" ? "main" : "isolated";
     try {
-      const result = await this.queue.enqueue(() =>
-        this.bridge.executeJs(body.code)
+      const result = await this.queue.enqueue(
+        () => this.bridge.executeJs(body.code, world, body.tabId),
+        60000,
+        body.tabId,
       );
       this.sendJson(res, 200, { ok: true, data: result });
     } catch (err) {
@@ -274,6 +301,157 @@ export class HttpApi {
     }
   }
 
+  // ─── OS-level input (cliclick / AppleScript) ───────────────────
+
+  private async handleWindowGeometry(_body: any, res: ServerResponse): Promise<void> {
+    try {
+      const geom = await this.queue.enqueue(() => this.bridge.getWindowGeometry());
+      this.sendJson(res, 200, { ok: true, data: geom });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /**
+   * OS-level click. Body:
+   *   { x, y, button?, stealth?, synthetic?, focus_chrome? }
+   *
+   * x, y are PAGE CSS coordinates from a spatial_snapshot. The daemon
+   * fetches current Chrome window geometry, converts to screen coords,
+   * then dispatches via cliclick (real CGEvent, isTrusted=true).
+   *
+   * Stealth defaults: animated cursor travel + post-arrival pause +
+   * coord jitter. Pass stealth=false to skip animation. Pass
+   * synthetic=true to fall back to the legacy in-page MouseEvent
+   * dispatch (CSP-fragile, isTrusted=false — only for edge cases).
+   *
+   * If cliclick is not installed, returns 503 with install instructions
+   * unless synthetic=true was requested.
+   */
+  private async handleClickOs(body: any, res: ServerResponse): Promise<void> {
+    if (body.x == null || body.y == null) {
+      return this.sendJson(res, 400, { ok: false, error: "Missing required fields: x, y" });
+    }
+    const useSynthetic = body.synthetic === true;
+    if (!useSynthetic && !isCliclickInstalled()) {
+      return this.sendJson(res, 503, {
+        ok: false,
+        error: "cliclick not installed. Run: brew install cliclick. Or pass { synthetic: true } to fall back to in-page MouseEvent dispatch (loses isTrusted=true).",
+      });
+    }
+    try {
+      const result = await this.queue.enqueue(async () => {
+        if (useSynthetic) {
+          return this.bridge.click(body.x, body.y, body.button || "left");
+        }
+        const geom = (await this.bridge.getWindowGeometry()) as WindowGeometry;
+        const screen = pageToScreen({ x: body.x, y: body.y }, geom);
+        await osClick(screen.x, screen.y, {
+          stealth: body.stealth !== false,
+          button: body.button || "left",
+          focusChrome: body.focus_chrome !== false,
+        });
+        return {
+          dispatched: "os",
+          page: { x: body.x, y: body.y },
+          screen,
+          stealth: body.stealth !== false,
+        };
+      });
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /**
+   * OS-level type. Body:
+   *   { text, x?, y?, focus_first?, clear_first?, press_enter?, stealth?, synthetic? }
+   *
+   * If x and y are provided AND focus_first !== false, OS-clicks that
+   * coordinate first to focus the field, then types via cliclick. If
+   * focus is already where you want it, omit x/y.
+   *
+   * clear_first uses cmd+a then delete to wipe existing text before typing.
+   * press_enter sends a return keystroke after the text.
+   */
+  private async handleTypeOs(body: any, res: ServerResponse): Promise<void> {
+    if (!body.text && !body.press_enter) {
+      return this.sendJson(res, 400, { ok: false, error: "Missing required field: text" });
+    }
+    const useSynthetic = body.synthetic === true;
+    if (!useSynthetic && !isCliclickInstalled()) {
+      return this.sendJson(res, 503, {
+        ok: false,
+        error: "cliclick not installed. Run: brew install cliclick. Or pass { synthetic: true } to use the legacy in-page dispatch.",
+      });
+    }
+    try {
+      const result = await this.queue.enqueue(async () => {
+        if (useSynthetic) {
+          const x = body.x ?? 0;
+          const y = body.y ?? 0;
+          await this.bridge.type(x, y, body.text || "", body.clear_first || false);
+          if (body.press_enter) {
+            await this.bridge.executeJs(
+              "document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;"
+            );
+          }
+          return { dispatched: "synthetic", typed: body.text || "" };
+        }
+
+        // Focus the target field first, if coordinates given.
+        if (body.x != null && body.y != null && body.focus_first !== false) {
+          const geom = (await this.bridge.getWindowGeometry()) as WindowGeometry;
+          const screen = pageToScreen({ x: body.x, y: body.y }, geom);
+          await osClick(screen.x, screen.y, { stealth: body.stealth !== false });
+          await stealthGap(150, 350);
+        }
+
+        if (body.clear_first) {
+          // Cmd+A then delete via cliclick key presses.
+          // kd:cmd / ku:cmd hold/release; t:a inside types 'a' which combined
+          // with cmd yields select-all. Then `kp:delete`.
+          const { spawn } = await import("child_process");
+          const runCli = (args: string[]) => new Promise<void>((resolve, reject) => {
+            const p = spawn("cliclick", args, { stdio: ["ignore", "ignore", "pipe"] });
+            p.on("error", reject);
+            p.on("close", () => resolve());
+          });
+          await runCli(["kd:cmd"]);
+          await runCli(["t:a"]);
+          await runCli(["ku:cmd"]);
+          await runCli(["kp:delete"]);
+          await stealthGap(80, 180);
+        }
+
+        if (body.text) {
+          await osType(body.text, { stealth: body.stealth !== false });
+        }
+
+        if (body.press_enter) {
+          await stealthGap(150, 400);
+          const { spawn } = await import("child_process");
+          await new Promise<void>((resolve, reject) => {
+            const p = spawn("cliclick", ["kp:return"], { stdio: ["ignore", "ignore", "pipe"] });
+            p.on("error", reject);
+            p.on("close", () => resolve());
+          });
+        }
+
+        return {
+          dispatched: "os",
+          typed: body.text || "",
+          press_enter: !!body.press_enter,
+          stealth: body.stealth !== false,
+        };
+      });
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
   // ─── Helpers ─────────────────────────────────────────────────────
 
   private async readBody(req: IncomingMessage): Promise<any> {
@@ -301,5 +479,48 @@ export class HttpApi {
   private sendError(res: ServerResponse, err: unknown): void {
     const msg = err instanceof Error ? err.message : String(err);
     this.sendJson(res, 500, { ok: false, error: msg });
+  }
+
+  // ─── Tab pool endpoints ───────────────────────────────────────────
+
+  /** GET-style POST: list all tabs the extension considers managed. */
+  private async handleListTabs(res: ServerResponse): Promise<void> {
+    try {
+      // Goes through the global bucket since it's a meta-operation, not
+      // a tab-targeted one.
+      const result = await this.queue.enqueue(() => this.bridge.send("list_tabs", {}));
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /** Spawn a new tab in the dedicated NeoVision window. Returns its tabId. */
+  private async handleSpawnTab(body: any, res: ServerResponse): Promise<void> {
+    try {
+      const result = await this.queue.enqueue(() =>
+        this.bridge.send("spawn_tab", { url: body.url || "about:blank" })
+      );
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /** Close a managed tab. Will not close non-NeoVision tabs (extension enforces). */
+  private async handleCloseTab(body: any, res: ServerResponse): Promise<void> {
+    if (typeof body.tabId !== "number") {
+      return this.sendJson(res, 400, { ok: false, error: "Missing required field: tabId (number)" });
+    }
+    try {
+      const result = await this.queue.enqueue(
+        () => this.bridge.send("close_tab", { tabId: body.tabId }),
+        30000,
+        body.tabId,
+      );
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
   }
 }

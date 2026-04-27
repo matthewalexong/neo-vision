@@ -190,6 +190,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'get_status':
       sendResponse({ connected, port: currentPort });
       return true;
+
+    case 'log':
+      // Forward extension-side log message over the WebSocket so the daemon
+      // can persist it to ~/.neo-vision/logs/extension.log. If the WS is
+      // currently down, drop the message (it's already in the local console).
+      if (ws && ws.readyState === 1) {
+        sendWs({
+          type: 'log',
+          level: msg.level || 'info',
+          src: msg.src || 'extension',
+          msg: msg.msg || '',
+          ctx: msg.ctx,
+        });
+      }
+      return false;
   }
 
   return false;

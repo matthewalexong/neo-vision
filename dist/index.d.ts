@@ -2,17 +2,11 @@
  * NeoVision — Programmatic API
  *
  * See the web the way Neo sees the Matrix.
- * Use this to integrate spatial DOM mapping into any agent harness:
+ * Integrate spatial DOM mapping into any agent harness:
  * Claude Code, Cowork, OpenClaw, AntiGravity, LangChain, CrewAI, etc.
  *
- * Usage:
- *   import { SpatialBrowser } from 'neo-vision';
- *
- *   const browser = new SpatialBrowser({ mode: 'stealth' });
- *   const map = await browser.snapshot('https://example.com');
- *   console.log(map.elements.filter(e => e.actionable));
- *   await browser.click(map.elements[5].click_center!);
- *   await browser.close();
+ * Extension-only architecture: the Chrome extension drives the real browser.
+ * Use ChromeBridge directly, or run the MCP server and connect via the extension.
  */
 export { queryMap, type QueryFilters } from "./query.js";
 export type { SpatialMap, SpatialElement, SpatialMapStats, Bounds, Point, ComputedLayout, } from "./schema.js";

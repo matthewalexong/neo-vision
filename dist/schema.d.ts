@@ -38,14 +38,20 @@ export declare const ClickInput: z.ZodObject<{
     x: z.ZodNumber;
     y: z.ZodNumber;
     button: z.ZodDefault<z.ZodEnum<["left", "right"]>>;
+    stealth: z.ZodDefault<z.ZodBoolean>;
+    synthetic: z.ZodDefault<z.ZodBoolean>;
 }, "strip", z.ZodTypeAny, {
     x: number;
     y: number;
     button: "left" | "right";
+    stealth: boolean;
+    synthetic: boolean;
 }, {
     x: number;
     y: number;
     button?: "left" | "right" | undefined;
+    stealth?: boolean | undefined;
+    synthetic?: boolean | undefined;
 }>;
 export declare const TypeInput: z.ZodObject<{
     text: z.ZodString;
@@ -53,8 +59,12 @@ export declare const TypeInput: z.ZodObject<{
     y: z.ZodOptional<z.ZodNumber>;
     clear_first: z.ZodDefault<z.ZodBoolean>;
     press_enter: z.ZodDefault<z.ZodBoolean>;
+    stealth: z.ZodDefault<z.ZodBoolean>;
+    synthetic: z.ZodDefault<z.ZodBoolean>;
 }, "strip", z.ZodTypeAny, {
     text: string;
+    stealth: boolean;
+    synthetic: boolean;
     clear_first: boolean;
     press_enter: boolean;
     x?: number | undefined;
@@ -63,6 +73,8 @@ export declare const TypeInput: z.ZodObject<{
     text: string;
     x?: number | undefined;
     y?: number | undefined;
+    stealth?: boolean | undefined;
+    synthetic?: boolean | undefined;
     clear_first?: boolean | undefined;
     press_enter?: boolean | undefined;
 }>;

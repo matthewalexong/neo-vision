@@ -17,11 +17,51 @@
 import { ChromeBridge } from "./bridge.js";
 import { RequestQueue } from "./queue.js";
 import { HttpApi } from "./http-api.js";
+import { statSync, renameSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
+import { homedir } from "os";
 
 const BRIDGE_PORT = parseInt(process.env.NEO_VISION_BRIDGE_PORT || "7665", 10);
 const API_PORT = parseInt(process.env.NEO_VISION_API_PORT || "7680", 10);
 
+// ─── Log rotation ─────────────────────────────────────────────────
+//
+// Launchd captures our stdout/stderr to ~/.neo-vision/logs/daemon{,-error}.log
+// and ~/.neo-vision/logs/extension.log via plist redirects. These files grow
+// forever — daemon-error.log was 2.1MB after a few weeks of normal use with
+// no rotation in place. At startup, rotate any log >10MB so we don't fill
+// the user's disk over months.
+const LOG_DIR = join(homedir(), ".neo-vision", "logs");
+const ROTATE_FILES = ["daemon.log", "daemon-error.log", "extension.log"];
+const ROTATE_THRESHOLD_BYTES = 10 * 1024 * 1024;   // 10 MB
+
+function rotateLogsIfNeeded() {
+  try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+  for (const name of ROTATE_FILES) {
+    const path = join(LOG_DIR, name);
+    if (!existsSync(path)) continue;
+    let size = 0;
+    try { size = statSync(path).size; } catch { continue; }
+    if (size <= ROTATE_THRESHOLD_BYTES) continue;
+    const archived = path + ".1";
+    try {
+      // Move existing .1 to .2 to keep one round-trip of history.
+      if (existsSync(archived)) {
+        try { renameSync(archived, path + ".2"); } catch {}
+      }
+      renameSync(path, archived);
+      // Recreate empty file so launchd's redirect target still exists.
+      writeFileSync(path, "");
+      console.error(`[Daemon] rotated ${name} (was ${(size / 1024 / 1024).toFixed(1)} MB) → ${name}.1`);
+    } catch (e) {
+      console.error(`[Daemon] log rotation failed for ${name}:`, e);
+    }
+  }
+}
+
 async function main() {
+  rotateLogsIfNeeded();
+
   console.error("╔═══════════════════════════════════════════════╗");
   console.error("║         NeoVision Daemon — Hub Process        ║");
   console.error("╚═══════════════════════════════════════════════╝");

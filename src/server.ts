@@ -366,7 +366,23 @@ The full DOM map is always cached server-side regardless of output format. Use s
         includeNonVisible: input.include_non_visible,
       });
 
-      lastSnapshot = result as any;
+      // Guard: the daemon may return the snapshot wrapped in { spatial_map: ... }
+      // or the snapshot directly. Unwrap if needed, and guard against null.
+      const snapshot = (result as any)?.spatial_map ?? result;
+
+      if (!snapshot || !snapshot.viewport || !snapshot.elements) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: Spatial injection returned null. The extension may not be attached to a real page. " +
+              "Make sure you navigate to a URL first (not about:blank). " +
+              "If the problem persists, the extension may need to be reloaded at chrome://extensions.",
+          }],
+          isError: true,
+        };
+      }
+
+      lastSnapshot = snapshot as SpatialMap;
       lastMaxElements = input.max_elements;
       lastCompact = input.compact;
       lastOutputFormat = input.output_format;
@@ -397,7 +413,16 @@ The full DOM map is always cached server-side regardless of output format. Use s
 
 server.tool(
   "spatial_click",
-  `Click an element on the page at exact pixel coordinates. Use the click_center.x and click_center.y values from a spatial_snapshot element.
+  `Click an element on the page using REAL OS-level mouse events (cliclick / CGEvent).
+The cursor visibly travels to the target with eased animation, pauses briefly,
+then clicks — producing event.isTrusted=true that passes anti-bot detection
+(Cloudflare, Datadome, X, reCAPTCHA, etc).
+
+Use click_center.x and click_center.y from a spatial_snapshot element.
+
+Defaults to stealth=true (animated cursor + jitter + post-arrival pause).
+Pass synthetic=true to fall back to the legacy in-page MouseEvent dispatch
+for edge cases (iframes, hidden elements) — but lose isTrusted=true.
 
 Returns an updated spatial map reflecting the page state after the click.`,
   ClickInput.shape,
@@ -412,7 +437,29 @@ Returns an updated spatial map reflecting the page state after the click.`,
         };
       }
 
-      await client.click(input.x, input.y, input.button);
+      // Default path: real OS-level click via cliclick (CGEvent, isTrusted=true).
+      // Falls through to synthetic only if explicitly requested or if cliclick
+      // is not installed (daemon returns 503 in that case).
+      try {
+        await client.clickOs(input.x, input.y, {
+          button: input.button,
+          stealth: input.stealth,
+          synthetic: input.synthetic,
+        });
+      } catch (osErr) {
+        const msg = osErr instanceof Error ? osErr.message : String(osErr);
+        if (msg.includes("cliclick not installed") && !input.synthetic) {
+          // Helpful error — don't silently downgrade to synthetic, since
+          // that defeats the whole anti-bot point.
+          return {
+            content: [{ type: "text" as const, text:
+              `Error: ${msg}\n\nTo dispatch real OS-level mouse events (which look human and pass anti-bot checks), install cliclick:\n  brew install cliclick\n\nOr re-call this tool with { synthetic: true } to use the legacy in-page dispatch (event.isTrusted will be false — most anti-bot systems will catch it).`
+            }],
+            isError: true,
+          };
+        }
+        throw osErr;
+      }
 
       const result = await client.injectSpatial({
         verbosity: lastVerbosity,
@@ -420,7 +467,10 @@ Returns an updated spatial map reflecting the page state after the click.`,
         includeNonVisible: false,
       });
 
-      lastSnapshot = result as any;
+      // Unwrap the bridge's { spatial_map: ... } envelope if present —
+      // matches the same handling spatial_snapshot does.
+      const snapshot = (result as any)?.spatial_map ?? result;
+      lastSnapshot = snapshot as any;
 
       return {
         content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot as SpatialMap, lastMaxElements, lastCompact, lastOutputFormat, lastVerbosity) }],
@@ -456,12 +506,29 @@ Returns an updated spatial map.`,
         };
       }
 
-      const x = input.x ?? 0;
-      const y = input.y ?? 0;
-      await client.type(x, y, input.text, input.clear_first);
-
-      if (input.press_enter) {
-        await client.executeJs("document.activeElement?.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter'})); true;");
+      // OS-level path: focuses field with a real click (if x/y given),
+      // then types via cliclick with per-keystroke timing variance.
+      try {
+        await client.typeOs(input.text, {
+          x: input.x,
+          y: input.y,
+          focus_first: input.x != null && input.y != null,
+          clear_first: input.clear_first,
+          press_enter: input.press_enter,
+          stealth: input.stealth,
+          synthetic: input.synthetic,
+        });
+      } catch (osErr) {
+        const msg = osErr instanceof Error ? osErr.message : String(osErr);
+        if (msg.includes("cliclick not installed") && !input.synthetic) {
+          return {
+            content: [{ type: "text" as const, text:
+              `Error: ${msg}\n\nFor real OS-level keystrokes (isTrusted=true, anti-bot resistant), install cliclick:\n  brew install cliclick\n\nOr re-call this tool with { synthetic: true } to fall back to the legacy in-page dispatch (loses isTrusted, breaks on CSP-strict sites like x.com).`
+            }],
+            isError: true,
+          };
+        }
+        throw osErr;
       }
 
       const result = await client.injectSpatial({
@@ -470,7 +537,10 @@ Returns an updated spatial map.`,
         includeNonVisible: false,
       });
 
-      lastSnapshot = result as any;
+      // Unwrap the bridge's { spatial_map: ... } envelope if present —
+      // matches the same handling spatial_snapshot does.
+      const snapshot = (result as any)?.spatial_map ?? result;
+      lastSnapshot = snapshot as any;
 
       return {
         content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot as SpatialMap, lastMaxElements, lastCompact, lastOutputFormat, lastVerbosity) }],
@@ -479,6 +549,38 @@ Returns an updated spatial map.`,
       const msg = error instanceof Error ? error.message : String(error);
       return {
         content: [{ type: "text" as const, text: `Error typing: ${msg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ─── spatial_get_window_geometry ─────────────────────────────────
+
+server.tool(
+  "spatial_get_window_geometry",
+  `Return the current Chrome window's screen geometry — used internally by
+spatial_click and spatial_type to translate page CSS coordinates into screen
+pixels for OS-level (cliclick / CGEvent) input dispatch.
+
+Useful for debugging coordinate translation issues, or for callers that want
+to dispatch their own OS-level events. Returns:
+  - window: { left, top, width, height, state, focused }
+  - viewport: { width, height }       (page innerWidth / innerHeight)
+  - chrome_offset: { x, y }           (pixels from window edge to page top-left)
+  - scroll: { x, y }                  (current page scroll offset)
+  - device_pixel_ratio: number`,
+  {},
+  async () => {
+    try {
+      const geom = await client.getWindowGeometry();
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(geom, null, 2) }],
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text" as const, text: `Error getting window geometry: ${msg}` }],
         isError: true,
       };
     }
@@ -514,7 +616,10 @@ Returns an updated spatial map reflecting the new scroll position.`,
         includeNonVisible: false,
       });
 
-      lastSnapshot = result as any;
+      // Unwrap the bridge's { spatial_map: ... } envelope if present —
+      // matches the same handling spatial_snapshot does.
+      const snapshot = (result as any)?.spatial_map ?? result;
+      lastSnapshot = snapshot as any;
 
       return {
         content: [{ type: "text" as const, text: formatSnapshot(lastSnapshot as SpatialMap, lastMaxElements, lastCompact, lastOutputFormat, lastVerbosity) }],
@@ -834,19 +939,41 @@ server.tool(
 
 server.tool(
   "spatial_execute_js",
-  `Execute JavaScript in the page context of the real Chrome browser via the extension.
+  `Execute JavaScript in the page via the Chrome extension.
 
-Runs arbitrary JS in the MAIN world — full access to page DOM, variables, and APIs.
-Returns the result of the expression.`,
+Two execution worlds, selected by the optional 'world' parameter:
+
+  'isolated' (default) — runs in the extension's content script context.
+    + Bypasses the page's CSP entirely (works on x.com, GitHub, banks,
+      and any site with a strict script-src directive).
+    + Full DOM access: querySelector, getBoundingClientRect, etc.
+    - Cannot read page-defined window globals (page's React state,
+      site-injected globals). DIFFERENT JS context from the page.
+
+  'main' — runs in the page's MAIN world via <script> tag injection.
+    + Full access to page-world JS variables.
+    - Silently fails on CSP-strict sites (returns null with no error).
+
+Default 'isolated' is the right choice for ~95% of automation: read DOM,
+click stuff, read text. Only switch to 'main' when you specifically need
+to read or modify a page-defined window variable.
+
+Returns: { result, world } — the expression's value and which world ran it.`,
   {
     code: z.string().describe("JavaScript code to execute. The last expression's value is returned."),
+    world: z.enum(["isolated", "main"]).default("isolated").describe(
+      "Execution world. 'isolated' (default) bypasses page CSP but can't see page-world vars. 'main' has page-world access but fails on CSP-strict sites."
+    ),
   },
   async (params) => {
     try {
-      const input = z.object({ code: z.string() }).parse(params);
-      const result = await client.executeJs(input.code);
+      const input = z.object({
+        code: z.string(),
+        world: z.enum(["isolated", "main"]).default("isolated"),
+      }).parse(params);
+      const result = await client.executeJs(input.code, input.world);
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ result }, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ result, world: input.world }, null, 2) }],
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

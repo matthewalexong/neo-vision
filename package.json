@@ -33,6 +33,8 @@
     "dev": "tsx src/server.ts",
     "daemon": "node dist/daemon.js",
     "dev:daemon": "tsx src/daemon.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build",
     "postinstall": "echo '\\n  NeoVision installed! Run: npx neo-vision --setup\\n  Or see: https://github.com/matthewalexong/neo-vision#bridge\\n'"
   },
@@ -83,7 +85,8 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.4"
   },
   "mcpName": "io.github.matthewalexong/neo-vision"
 }

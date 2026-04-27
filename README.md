@@ -45,7 +45,15 @@ We tested this against the five most notoriously anti-bot sites on the web — *
 3. Click **Load unpacked** and select the `extension/` folder from this repo
 4. The NeoVision Bridge icon will appear in your toolbar
 
-### 2. Add to Your MCP Config
+### 2. Install cliclick (for OS-level mouse and keyboard)
+
+```bash
+brew install cliclick
+```
+
+`spatial_click` and `spatial_type` dispatch real CGEvents through cliclick by default. Without it, those two tools will return a helpful error pointing you here. The other tools (snapshot, query, scroll, screenshot, etc.) work without cliclick.
+
+### 3. Add to Your MCP Config
 
 ```json
 {
@@ -58,19 +66,19 @@ We tested this against the five most notoriously anti-bot sites on the web — *
 }
 ```
 
-The MCP server starts automatically. The Chrome extension connects to it via WebSocket. Once connected, all 15 spatial tools are available.
+The MCP server starts automatically. The Chrome extension connects to it via WebSocket. Once connected, all 16 spatial tools are available.
 
 ## MCP Tools
 
-NeoVision exposes **15 tools** through the MCP server, organized by function:
+NeoVision exposes **16 tools** through the MCP server, organized by function:
 
 ### Core Navigation
 
 | Tool | Description |
 |------|-------------|
-| `spatial_snapshot` | Navigate to a URL and return a spatial DOM map with element coordinates, ARIA roles, and actionability flags. Supports `compact` and `agent` output formats. |
-| `spatial_click` | Click at specified pixel coordinates. Returns updated spatial map reflecting page state after the click. |
-| `spatial_type` | Type text into an element. Supports `clear_first` to replace existing text and `press_enter` to submit. |
+| `spatial_snapshot` | Navigate to a URL and return a spatial DOM map with element coordinates, ARIA roles, and actionability flags. Supports `compact` and `agent` output formats. Now CSP-safe — works on x.com, GitHub, banks, and other strict-CSP sites. |
+| `spatial_click` | **Real OS-level mouse click** via cliclick (CGEvent, `event.isTrusted = true`). Cursor visibly travels to the target with eased animation; ±3px coord jitter; post-arrival pause. Defeats `isTrusted`-based anti-bot detection. Pass `synthetic: true` for the legacy in-page MouseEvent dispatch (only for edge cases). Requires `brew install cliclick`. |
+| `spatial_type` | **Real OS-level keystrokes** via cliclick. Per-keystroke 60–180ms delays + occasional thinking pauses on word boundaries. `event.isTrusted = true`. Auto-focuses the field by clicking it first if `x`/`y` given. Requires `brew install cliclick`. |
 | `spatial_scroll` | Scroll the page or a specific scrollable container. Returns updated spatial map. |
 | `spatial_query` | Filter the cached spatial map by ARIA role, HTML tag, label text, bounding box region, or actionability — without reloading the page. |
 
@@ -81,7 +89,8 @@ NeoVision exposes **15 tools** through the MCP server, organized by function:
 | `spatial_screenshot` | Capture a PNG screenshot of the current page as base64-encoded data. |
 | `spatial_navigate` | Load a URL without capturing a snapshot — lighter-weight than `spatial_snapshot` when you just need to navigate. |
 | `spatial_wait` | Pause execution for a specified duration. Use for pacing between page navigations. |
-| `spatial_execute_js` | Run arbitrary JavaScript in the page context and return the result. Full access to DOM, window, and page variables. |
+| `spatial_execute_js` | Run arbitrary JavaScript in the page. Defaults to `world: 'isolated'` (the extension's content-script context — bypasses page CSP, full DOM access, no page-world variable access). Pass `world: 'main'` for the legacy MAIN-world behavior (page-world vars accessible but breaks on CSP-strict sites). |
+| `spatial_get_window_geometry` | Returns Chrome's screen position, chrome-bar height, current scroll offset, and devicePixelRatio. Used internally by `spatial_click` / `spatial_type` to translate page CSS coords → screen pixels for OS-level dispatch. Exposed for debugging coordinate translation. |
 
 ### Advanced
 

@@ -15,9 +15,22 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { getInjectableScript } from "./injectable.js";
 import { spawn } from "child_process";
-import { existsSync } from "fs";
-import { resolve, dirname } from "path";
+import { existsSync, readFileSync, appendFileSync, mkdirSync } from "fs";
+import { createHash } from "crypto";
+import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { homedir } from "os";
+// Where extension-forwarded log messages get written.
+const EXTENSION_LOG_PATH = join(homedir(), ".neo-vision", "logs", "extension.log");
+function appendExtensionLog(line) {
+    try {
+        mkdirSync(dirname(EXTENSION_LOG_PATH), { recursive: true });
+        appendFileSync(EXTENSION_LOG_PATH, line + "\n", "utf8");
+    }
+    catch {
+        // Last-ditch — don't crash the daemon over a log write failure.
+    }
+}
 export class ChromeBridge {
     wss = null;
     extension = null;
@@ -29,6 +42,17 @@ export class ChromeBridge {
     chromeProcess = null;
     autoLaunching = false;
     extensionPath;
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+    // Self-healing reconnect: never give up, exponential backoff capped at 30s.
+    // The previous fixed cap of 3 attempts caused the daemon to enter a permanent
+    // dead state after a few transient extension disconnects (which happen
+    // routinely when MV3 service workers are recycled).
+    static RECONNECT_BASE_DELAY_MS = 1000;
+    static RECONNECT_MAX_DELAY_MS = 30000;
+    /** SHA-256 hash of the on-disk extension files. Used to detect when the
+     * running extension is out of date relative to the daemon's source. */
+    expectedBuildHash;
     constructor(config = {}) {
         this.port = config.port || 7665;
         // Resolve extension path relative to this file's location (src/ or dist/)
@@ -36,6 +60,92 @@ export class ChromeBridge {
             ? __dirname
             : dirname(fileURLToPath(import.meta.url));
         this.extensionPath = resolve(thisDir, "..", "extension");
+        this.expectedBuildHash = this.computeExtensionHash();
+    }
+    /**
+     * Ask the extension for its build hash; if it differs from the on-disk
+     * hash, push reload_self. Tolerates older extensions that don't know
+     * about `fingerprint` — those get reload_self anyway.
+     */
+    async checkAndReloadIfStale() {
+        try {
+            // 15s timeout — MV3 service workers can take 4-8s to spin up cold,
+            // especially when the daemon respawns mid-session. Anything shorter
+            // misclassifies a healthy SW as a zombie and triggers unnecessary
+            // force-close cycles.
+            const resp = await this.send("fingerprint", {}, 15000);
+            if (resp && resp.success && typeof resp.build === "string") {
+                if (resp.build === this.expectedBuildHash) {
+                    console.error(`[NeoVision Bridge] Extension is up-to-date (build ${resp.build}).`);
+                    return;
+                }
+                console.error(`[NeoVision Bridge] Extension build mismatch — running ${resp.build}, expected ${this.expectedBuildHash}. Pushing reload_self.`);
+            }
+            else {
+                console.error(`[NeoVision Bridge] Extension does not support fingerprint — assuming stale. Pushing reload_self.`);
+            }
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // "Unknown command: fingerprint" → ancient extension. Push reload anyway.
+            if (/unknown command/i.test(msg)) {
+                console.error("[NeoVision Bridge] Extension is too old to report fingerprint — pushing reload_self.");
+            }
+            else if (/timed out|timeout/i.test(msg)) {
+                // Timeout = service worker is zombie (alive in TCP terms but its content
+                // script isn't dispatching commands). Force-close the WebSocket so the
+                // extension's MV3 alarm-based selfHeal() reconnects with a fresh SW.
+                // Previously we just `return`-ed here and entered an infinite reconnect
+                // loop where every command timed out. (See zombie-extension incident
+                // 2026-04-27.)
+                console.error(`[NeoVision Bridge] fingerprint timed out — likely zombie service worker. Force-closing to trigger reconnect.`);
+                if (this.extension && this.extension.readyState === 1) {
+                    this.extension.close(4002, "Fingerprint timeout — forcing fresh reconnect");
+                }
+                return;
+            }
+            else {
+                console.error(`[NeoVision Bridge] fingerprint check failed: ${msg}. Skipping auto-reload.`);
+                return;
+            }
+        }
+        // Push reload_self. The extension will chrome.runtime.reload() and reconnect
+        // on the new code. The infinite-retry reconnect handler picks it back up.
+        try {
+            await this.send("reload_self", {}, 3000);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!/unknown command|disconnected/i.test(msg)) {
+                console.error(`[NeoVision Bridge] reload_self push failed: ${msg}`);
+            }
+            // If reload_self isn't supported either, the user has to do it manually
+            // ONCE more at chrome://extensions to get the bootstrap code that
+            // includes both fingerprint and reload_self handlers.
+        }
+    }
+    /**
+     * SHA-256 of the concatenated extension source files. Used to detect when
+     * the extension running in Chrome is out of sync with the on-disk code.
+     *
+     * The extension computes the same hash on its side (via fetch +
+     * SubtleCrypto over the same files). When the daemon receives a hash
+     * mismatch on the `fingerprint` command response, it pushes `reload_self`
+     * to the extension, which calls chrome.runtime.reload() to pick up the
+     * new code from disk. No manual chrome://extensions reload required.
+     */
+    computeExtensionHash() {
+        const files = ["background.js", "spatial-snapshot.js", "offscreen.js", "manifest.json"];
+        const h = createHash("sha256");
+        for (const f of files) {
+            try {
+                h.update(readFileSync(join(this.extensionPath, f), "utf8"));
+            }
+            catch {
+                // missing file is fine — just hash what we have
+            }
+        }
+        return h.digest("hex").slice(0, 16); // short prefix is enough; truly unique for our purposes
     }
     /**
      * Auto-launch Chrome with the NeoVision Bridge extension loaded.
@@ -74,9 +184,22 @@ export class ChromeBridge {
                 throw new Error("Chrome not found. Install Google Chrome to use bridge tools.");
             }
             // Launch Chrome with the user's DEFAULT profile (real cookies, logins, history).
-            // --load-extension injects NeoVision into the session.
-            // If Chrome is already running, this opens a new window in the existing instance
-            // and the extension (if already installed) should connect.
+            //
+            // IMPORTANT: Google Chrome silently ignores `--load-extension` (logs:
+            // "--load-extension is not allowed in Google Chrome, ignoring."). This
+            // is by Google's policy and applies to BOTH the default profile and any
+            // dedicated --user-data-dir profile. The flag is kept here for two
+            // reasons:
+            //   1. It works in Chromium/Canary/Dev/Beta channels.
+            //   2. It signals intent — the extension path is documented in the
+            //      command line for setup tools (see scripts/install.sh).
+            //
+            // For Google Chrome stable, the user must INSTALL the extension once
+            // manually at chrome://extensions (Load unpacked → select extension/).
+            // After that, updates auto-deploy via the `reload_self` WebSocket
+            // command — the daemon hashes background.js + spatial-snapshot.js on
+            // every startup, sends the hash on the hello message, and the extension
+            // calls chrome.runtime.reload() if its stored hash differs.
             console.error(`[NeoVision Bridge] Auto-launching Chrome with extension...`);
             console.error(`[NeoVision Bridge]   Chrome: ${chromeBin}`);
             console.error(`[NeoVision Bridge]   Extension: ${this.extensionPath}`);
@@ -127,8 +250,21 @@ export class ChromeBridge {
         });
     }
     /**
-     * Ensure the extension is connected, auto-launching Chrome if needed.
-     * This is the main entry point for bridge tools — call this before any command.
+     * Ensure the extension is connected.
+     *
+     * Default behavior: if the extension isn't connected, return an error
+     * telling the caller to open Chrome themselves. The daemon happily sits
+     * idle on its WebSocket port; the extension's offscreen.js scans
+     * 7665-7674 and reconnects automatically the moment Chrome reopens with
+     * the extension loaded.
+     *
+     * Opt-in auto-launch: set env var NEO_VISION_AUTO_LAUNCH_CHROME=1 to
+     * restore the legacy behavior of spawning a blank Chrome window if the
+     * extension isn't connected when a tool is called.
+     *
+     * Why opt-in: closing Chrome and having the daemon pop a blank Chrome
+     * a second later is confusing — the daemon shouldn't second-guess the
+     * user's deliberate quit. (See user-feedback 2026-04-27.)
      */
     async ensureConnected() {
         if (this.ready)
@@ -141,11 +277,14 @@ export class ChromeBridge {
             if (quickConnect)
                 return;
         }
-        // Try auto-launching Chrome with the extension
-        await this.autoLaunchChrome();
+        const autoLaunch = process.env.NEO_VISION_AUTO_LAUNCH_CHROME === "1";
+        if (autoLaunch) {
+            await this.autoLaunchChrome();
+        }
         if (!this.ready) {
-            throw new Error("Could not connect to Chrome extension. " +
-                "Make sure Chrome is installed and the NeoVision extension folder exists.");
+            throw new Error(autoLaunch
+                ? "Could not connect to Chrome extension. Make sure Chrome is installed and the NeoVision extension folder exists."
+                : "Chrome extension not connected. Open Chrome (with the NeoVision extension loaded) and the daemon will reconnect automatically. To enable legacy auto-launch, set NEO_VISION_AUTO_LAUNCH_CHROME=1.");
         }
     }
     /** Start the WebSocket server, trying multiple ports if the default is busy */
@@ -221,6 +360,14 @@ export class ChromeBridge {
                         this.extension = ws;
                         this._ready = true;
                         console.error(`[NeoVision Bridge] Extension identified: ${msg.agent} v${msg.version}`);
+                        // Start heartbeat watchdog — closes zombie WS if no heartbeat for 45s.
+                        this.startHeartbeatWatchdog();
+                        // Auto-update check: if the extension's running code differs
+                        // from the on-disk code, push reload_self so it re-reads from
+                        // the unpacked extension folder.
+                        this.checkAndReloadIfStale().catch((err) => {
+                            console.error("[NeoVision Bridge] Auto-update check failed:", err);
+                        });
                         return;
                     }
                     // If this IS the extension, handle its responses to pending requests
@@ -245,15 +392,9 @@ export class ChromeBridge {
             ws.on("close", () => {
                 clearTimeout(identifyTimeout);
                 if (ws === this.extension) {
-                    console.error("[NeoVision Bridge] Chrome extension disconnected");
                     this.extension = null;
                     this._ready = false;
-                    // Reject all pending requests
-                    for (const [id, req] of this.pendingRequests) {
-                        clearTimeout(req.timer);
-                        req.reject(new Error("Extension disconnected"));
-                    }
-                    this.pendingRequests.clear();
+                    this._handleExtensionDisconnect();
                 }
                 else {
                     this.externalClients.delete(ws);
@@ -290,6 +431,13 @@ export class ChromeBridge {
     get ready() {
         return this._ready && this.extension !== null && this.extension.readyState === WebSocket.OPEN;
     }
+    getStatus() {
+        return {
+            bridge: true,
+            extension: this.ready,
+            port: this.port,
+        };
+    }
     /** Send a command to the extension and wait for a response.
      *  Automatically launches Chrome with the extension if not connected. */
     async send(command, params = {}, timeoutMs = 60000) {
@@ -307,6 +455,26 @@ export class ChromeBridge {
     }
     /** Handle a response from the extension (could be for an MCP tool or an external client relay) */
     handleExtensionMessage(msg) {
+        // Track heartbeats from offscreen.js (every ~15s). Used by the watchdog to
+        // detect zombie state where the WebSocket is alive but the SW has been
+        // recycled and isn't dispatching commands.
+        if (msg && msg.type === "heartbeat") {
+            this._lastHeartbeatAt = Date.now();
+            return;
+        }
+        // Forwarded log lines from the extension. Persisted to extension.log so
+        // the user can grep for issues without having to open chrome://extensions
+        // and click into the service worker devtools console. Until this existed,
+        // most extension errors were invisible because the SW console isn't
+        // visible by default and several catch blocks swallowed errors silently.
+        if (msg && msg.type === "log") {
+            const ts = new Date().toISOString();
+            const level = (msg.level || "info").toUpperCase();
+            const ctx = msg.ctx ? ` ${JSON.stringify(msg.ctx)}` : "";
+            const src = msg.src ? ` [${msg.src}]` : "";
+            appendExtensionLog(`[${ts}] [${level}]${src} ${msg.msg || ""}${ctx}`);
+            return;
+        }
         // Response to a pending request (from MCP tools or relayed external clients)
         if (msg.id && this.pendingRequests.has(msg.id)) {
             const req = this.pendingRequests.get(msg.id);
@@ -320,23 +488,89 @@ export class ChromeBridge {
             }
         }
     }
+    // ─── Heartbeat watchdog ──────────────────────────────────────
+    // The extension's offscreen.js sends {type:'heartbeat'} every 15s while the
+    // WebSocket is healthy. If we stop seeing them while we still think the
+    // extension is connected, the connection is zombie — close it so the
+    // extension's MV3 alarm-based selfHeal() picks up with a fresh SW.
+    _lastHeartbeatAt = 0;
+    _watchdogTimer = null;
+    static WATCHDOG_INTERVAL_MS = 15000;
+    static WATCHDOG_MAX_GAP_MS = 45000; // 3 missed heartbeats
+    startHeartbeatWatchdog() {
+        this.stopHeartbeatWatchdog();
+        this._lastHeartbeatAt = Date.now(); // grace period on connect
+        this._watchdogTimer = setInterval(() => {
+            if (!this.extension || this.extension.readyState !== 1)
+                return;
+            const gap = Date.now() - this._lastHeartbeatAt;
+            if (gap > ChromeBridge.WATCHDOG_MAX_GAP_MS) {
+                console.error(`[NeoVision Bridge] No heartbeat for ${Math.round(gap / 1000)}s — assuming zombie SW. Force-closing to reconnect.`);
+                try {
+                    this.extension.close(4003, "Heartbeat watchdog timeout");
+                }
+                catch { }
+                this._lastHeartbeatAt = Date.now(); // reset to avoid spam-closing
+            }
+        }, ChromeBridge.WATCHDOG_INTERVAL_MS);
+    }
+    stopHeartbeatWatchdog() {
+        if (this._watchdogTimer) {
+            clearInterval(this._watchdogTimer);
+            this._watchdogTimer = null;
+        }
+    }
     // ─── High-level commands ──────────────────────────────────────
     /** Navigate to a URL */
-    async navigate(url) {
-        return this.send("navigate", { url });
+    async navigate(url, tabId) {
+        return this.send("navigate", tabId !== undefined ? { url, tabId } : { url });
     }
-    /** Execute JavaScript in the page context */
-    async executeJs(code, tabId) {
-        return this.send("execute_js", { code, tabId });
+    /**
+     * Execute JavaScript in the page.
+     *
+     * @param code        JS expression to evaluate. The expression's value is returned.
+     * @param world       'isolated' (default, CSP-safe, no page-world vars)
+     *                  | 'main' (page world, has page vars, fails on CSP-strict sites)
+     * @param tabId       Target tab. Defaults to the managed NeoVision tab.
+     */
+    async executeJs(code, world = "isolated", tabId) {
+        return this.send("execute_js", { code, world, tabId });
     }
-    /** Inject the NeoVision spatial snapshot and return the spatial map */
+    /**
+     * Inject the NeoVision spatial snapshot and return the spatial map.
+     *
+     * The extension now loads the snapshot from a bundled file (CSP-safe),
+     * so we just pass structured options. The legacy `injectable_source`
+     * field is kept for older extension builds that still expect it.
+     */
     async injectSpatial(options, tabId) {
-        const script = getInjectableScript({
+        const snapshot_options = {
             verbosity: options?.verbosity || "actionable",
             maxDepth: options?.maxDepth || 50,
             includeNonVisible: options?.includeNonVisible || false,
+        };
+        // Legacy fallback — older extension versions read `injectable_source`.
+        // New extension ignores it and uses extension/spatial-snapshot.js.
+        const legacy_source = getInjectableScript(snapshot_options);
+        return this.send("inject_spatial", {
+            snapshot_options,
+            injectable_source: legacy_source,
+            tabId,
         });
-        return this.send("inject_spatial", { injectable_source: script, tabId });
+    }
+    /**
+     * Get Chrome window geometry needed to convert page CSS coordinates
+     * into screen pixel coordinates for OS-level input dispatch (cliclick).
+     *
+     * Returns:
+     *   - window: { left, top, width, height, state, focused }
+     *   - viewport: { width, height }  (page innerWidth/innerHeight)
+     *   - chrome_offset: { x, y }       (vertical = tabs+address bar height)
+     *   - scroll: { x, y }
+     *   - device_pixel_ratio: number
+     */
+    async getWindowGeometry(tabId) {
+        return this.send("get_window_geometry", { tabId });
     }
     /** Click at coordinates */
     async click(x, y, button = "left", tabId) {
@@ -364,42 +598,79 @@ export class ChromeBridge {
     }
     /** Get page text content */
     async getPageText(tabId) {
-        return this.send("get_page_info", { tabId });
+        return this.send("get_page_text", { tabId });
     }
-    /** Reload the Chrome extension (self-heal mechanism).
-     *  Sends reload_extension command — the extension reloads itself and reconnects.
-     *  Used when the extension's WebSocket connection to the bridge is stale. */
-    async reloadExtension() {
-        if (!this.ready) {
-            // Not connected — extension can't reload itself, just return status
-            return { reloading: false };
+    /** Handle extension disconnect: reject pending requests and schedule reconnect.
+     *
+     * Uses exponential backoff capped at 30s with NO maximum attempt limit.
+     * Rationale: MV3 service workers are aggressively recycled by Chrome, which
+     * causes the offscreen WebSocket to drop intermittently. Giving up after a
+     * fixed number of attempts leaves the daemon in a dead state requiring
+     * manual user intervention. Infinite retry with backoff is the only sane
+     * default for an always-on local daemon.
+     */
+    _handleExtensionDisconnect() {
+        console.error("[NeoVision Bridge] Chrome extension disconnected");
+        for (const [, req] of this.pendingRequests) {
+            clearTimeout(req.timer);
+            req.reject(new Error("Extension disconnected"));
         }
-        try {
-            const result = await this.send("reload_extension", {}, 10000);
-            return result;
-        }
-        catch (err) {
-            // Extension reloaded before responding — that's fine
-            return { reloading: true };
-        }
-    }
-    /** Check if the bridge and extension are both connected. */
-    getStatus() {
-        return {
-            bridge: this.wss !== null,
-            extension: this._ready && this.extension !== null && this.extension.readyState === WebSocket.OPEN,
-            port: this.port,
-        };
+        this.pendingRequests.clear();
+        if (this._reconnectTimer)
+            clearTimeout(this._reconnectTimer);
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s, 30s, 30s...
+        // This gives the extension time to recover from transient SW recycles
+        // without burning CPU spinning, while still recovering quickly from
+        // brief outages.
+        const delay = Math.min(ChromeBridge.RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(this._reconnectAttempts, 5)), ChromeBridge.RECONNECT_MAX_DELAY_MS);
+        this._reconnectTimer = setTimeout(async () => {
+            this._reconnectTimer = null;
+            if (this.ready) {
+                this._reconnectAttempts = 0; // recovered on its own
+                return;
+            }
+            this._reconnectAttempts++;
+            console.error(`[NeoVision Bridge] Reconnect attempt ${this._reconnectAttempts} (next backoff if it fails: ${Math.min(ChromeBridge.RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(this._reconnectAttempts, 5)), ChromeBridge.RECONNECT_MAX_DELAY_MS) / 1000}s)...`);
+            try {
+                // First check if the extension is just temporarily down — give it a
+                // brief moment to reconnect on its own before relaunching Chrome.
+                const naturalRecovery = await this.waitForExtension(2000);
+                if (naturalRecovery) {
+                    this._reconnectAttempts = 0;
+                    console.error("[NeoVision Bridge] Extension reconnected on its own — no Chrome relaunch needed.");
+                    return;
+                }
+                // Still not connected; relaunch Chrome (which loads the extension).
+                await this.autoLaunchChrome();
+                if (this.ready) {
+                    this._reconnectAttempts = 0;
+                    console.error("[NeoVision Bridge] Reconnect succeeded.");
+                }
+                else {
+                    // Schedule another attempt — autoLaunchChrome may have hit the
+                    // 20s wait timeout but the extension could still appear shortly.
+                    this._handleExtensionDisconnect();
+                }
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error(`[NeoVision Bridge] Reconnect failed: ${msg}. Will retry with backoff.`);
+                // Schedule the next attempt — never give up.
+                this._handleExtensionDisconnect();
+            }
+        }, delay);
     }
     /** Stop the bridge server and any auto-launched Chrome */
     async stop() {
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
         if (this.extension)
             this.extension.close();
         if (this.wss)
             this.wss.close();
         this._ready = false;
-        // Don't kill user's Chrome — they may have tabs open.
-        // Just release references. Chrome stays running independently.
         this.chromeProcess = null;
     }
 }

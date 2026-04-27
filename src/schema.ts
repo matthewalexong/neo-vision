@@ -22,6 +22,8 @@ export const ClickInput = z.object({
   x: z.number().describe("X coordinate in CSS pixels — use click_center.x from a spatial_snapshot element"),
   y: z.number().describe("Y coordinate in CSS pixels — use click_center.y from a spatial_snapshot element"),
   button: z.enum(["left", "right"]).default("left").describe("Mouse button (default: left)"),
+  stealth: z.boolean().default(true).describe("Stealth mode (default: true). Real OS-level CGEvent dispatch via cliclick: animated cursor travel, post-arrival pause, ±3px coord jitter, isTrusted=true. Set false for instant teleport-and-click (still OS-level)."),
+  synthetic: z.boolean().default(false).describe("Use legacy in-page MouseEvent dispatch instead of OS-level CGEvent. Loses isTrusted=true (anti-bot detectable) and breaks on CSP-strict sites. Only use for iframes / hidden elements that won't accept real input."),
 });
 
 export const TypeInput = z.object({
@@ -30,6 +32,8 @@ export const TypeInput = z.object({
   y: z.number().optional().describe("Optional: click this Y coordinate first to focus the element, then type"),
   clear_first: z.boolean().default(false).describe("Select all + delete existing text before typing (default: false)"),
   press_enter: z.boolean().default(false).describe("Press Enter after typing — useful for search boxes and forms (default: false)"),
+  stealth: z.boolean().default(true).describe("Stealth mode (default: true). Per-keystroke OS-level dispatch via cliclick with avg 60-180ms delay between chars + occasional thinking pauses. Set false for instant bulk-string type."),
+  synthetic: z.boolean().default(false).describe("Use legacy in-page KeyboardEvent dispatch instead of OS-level. Loses isTrusted=true and breaks on CSP-strict sites. Only use for edge cases."),
 });
 
 export const ScrollInput = z.object({
@@ -43,7 +47,7 @@ export const QueryInput = z.object({
   role: z.string().optional().describe('Filter by ARIA role, e.g. "button", "link", "textbox", "heading"'),
   tag: z.string().optional().describe('Filter by HTML tag, e.g. "input", "a", "div"'),
   label_contains: z.string().optional().describe("Filter elements whose accessible label contains this text (case-insensitive)"),
-  text_contains: z.string().optional().describe("Filter elements whose visible text or label contains this string (case-insensitive). This is the primary way to search the cached snapshot after using output_format='summary'."),
+  text_contains: z.string().optional().describe("Filter elements whose text or label contains this substring (case-insensitive)"),
   region: z.object({
     x: z.number(),
     y: z.number(),

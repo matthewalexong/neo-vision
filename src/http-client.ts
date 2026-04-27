@@ -121,12 +121,63 @@ export class HttpClient {
     return this.post("/api/scroll", { delta_x: deltaX, delta_y: deltaY, x, y });
   }
 
-  async executeJs(code: string): Promise<any> {
-    return this.post("/api/execute_js", { code });
+  /**
+   * Execute JavaScript in the page.
+   *
+   * @param code   JS expression to evaluate. Last expression value is returned.
+   * @param world  'isolated' (default, CSP-safe, no page-world variable access)
+   *             | 'main' (full page-world access, fails on CSP-strict sites)
+   */
+  async executeJs(code: string, world: "isolated" | "main" = "isolated"): Promise<any> {
+    return this.post("/api/execute_js", { code, world });
   }
 
   async screenshot(): Promise<any> {
     return this.post("/api/screenshot", {});
+  }
+
+  // ─── OS-level input (cliclick) ─────────────────────────────────
+
+  async getWindowGeometry(): Promise<{
+    window: { left: number; top: number; width: number; height: number; state?: string; focused?: boolean };
+    viewport: { width: number; height: number };
+    chrome_offset: { x: number; y: number };
+    scroll: { x: number; y: number };
+    device_pixel_ratio: number;
+  }> {
+    return this.post("/api/window_geometry", {});
+  }
+
+  /**
+   * Click at PAGE coordinates with real OS-level CGEvent dispatch.
+   * Daemon translates page → screen via window geometry, then cliclicks.
+   * Stealth defaults: visible cursor travel + post-arrival pause + jitter.
+   */
+  async clickOs(
+    x: number,
+    y: number,
+    opts: { button?: "left" | "right"; stealth?: boolean; synthetic?: boolean; focus_chrome?: boolean } = {}
+  ): Promise<any> {
+    return this.post("/api/click_os", { x, y, ...opts });
+  }
+
+  /**
+   * Type at OS level. If x/y given, focuses field by clicking first.
+   * Stealth defaults: per-keystroke delays with variance.
+   */
+  async typeOs(
+    text: string,
+    opts: {
+      x?: number;
+      y?: number;
+      focus_first?: boolean;
+      clear_first?: boolean;
+      press_enter?: boolean;
+      stealth?: boolean;
+      synthetic?: boolean;
+    } = {}
+  ): Promise<any> {
+    return this.post("/api/type_os", { text, ...opts });
   }
 
   async wait(seconds: number): Promise<void> {

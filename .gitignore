@@ -16,3 +16,4 @@ scrape-*.js
 enrich-*.js
 enrich-*.md
 HYBRID.md
+.claude/

@@ -17,6 +17,8 @@ export const ClickInput = z.object({
     x: z.number().describe("X coordinate in CSS pixels — use click_center.x from a spatial_snapshot element"),
     y: z.number().describe("Y coordinate in CSS pixels — use click_center.y from a spatial_snapshot element"),
     button: z.enum(["left", "right"]).default("left").describe("Mouse button (default: left)"),
+    stealth: z.boolean().default(true).describe("Stealth mode (default: true). Real OS-level CGEvent dispatch via cliclick: animated cursor travel, post-arrival pause, ±3px coord jitter, isTrusted=true. Set false for instant teleport-and-click (still OS-level)."),
+    synthetic: z.boolean().default(false).describe("Use legacy in-page MouseEvent dispatch instead of OS-level CGEvent. Loses isTrusted=true (anti-bot detectable) and breaks on CSP-strict sites. Only use for iframes / hidden elements that won't accept real input."),
 });
 export const TypeInput = z.object({
     text: z.string().describe("Text to type into the focused element"),
@@ -24,6 +26,8 @@ export const TypeInput = z.object({
     y: z.number().optional().describe("Optional: click this Y coordinate first to focus the element, then type"),
     clear_first: z.boolean().default(false).describe("Select all + delete existing text before typing (default: false)"),
     press_enter: z.boolean().default(false).describe("Press Enter after typing — useful for search boxes and forms (default: false)"),
+    stealth: z.boolean().default(true).describe("Stealth mode (default: true). Per-keystroke OS-level dispatch via cliclick with avg 60-180ms delay between chars + occasional thinking pauses. Set false for instant bulk-string type."),
+    synthetic: z.boolean().default(false).describe("Use legacy in-page KeyboardEvent dispatch instead of OS-level. Loses isTrusted=true and breaks on CSP-strict sites. Only use for edge cases."),
 });
 export const ScrollInput = z.object({
     delta_x: z.number().default(0).describe("Horizontal scroll in pixels. Positive = right, negative = left (default: 0)"),
