@@ -59,6 +59,11 @@ function rotateLogsIfNeeded() {
   }
 }
 
+// Module-level handles so the shutdown signal handler can reach them.
+let _bridge: ChromeBridge | null = null;
+let _queue: RequestQueue | null = null;
+let _api: HttpApi | null = null;
+
 async function main() {
   rotateLogsIfNeeded();
 
@@ -71,6 +76,8 @@ async function main() {
   const bridge = new ChromeBridge({ port: BRIDGE_PORT });
   const queue = new RequestQueue();
   const api = new HttpApi(bridge, queue, API_PORT);
+  _bridge = bridge; _queue = queue; _api = api;
+
 
   try {
     await bridge.start();
@@ -126,10 +133,57 @@ main().catch((err) => {
   process.exit(1);
 });
 
-// Clean shutdown
+// Clean shutdown — drain pending requests, close the WebSocket politely,
+// give the HTTP server a chance to finish in-flight responses. Bounded by a
+// hard deadline so a stuck client can't block us forever.
+let _shuttingDown = false;
 async function shutdown(signal: string) {
-  console.error(`\n[Daemon] Received ${signal}, shutting down...`);
-  process.exit(0);
+  if (_shuttingDown) {
+    // Second signal — caller is impatient. Hard-exit.
+    console.error(`[Daemon] ${signal} during shutdown — forcing exit`);
+    process.exit(1);
+  }
+  _shuttingDown = true;
+  console.error(`\n[Daemon] Received ${signal}, draining queue and shutting down...`);
+
+  const HARD_DEADLINE_MS = 5000;
+  const deadline = Date.now() + HARD_DEADLINE_MS;
+  const forceExit = setTimeout(() => {
+    console.error("[Daemon] Hard deadline reached, force-exiting");
+    process.exit(1);
+  }, HARD_DEADLINE_MS);
+  forceExit.unref?.();
+
+  try {
+    // Drain queue: reject everything pending so callers get a clean error
+    // instead of a TCP reset mid-request.
+    if (_queue) {
+      const stats = _queue.getStats();
+      if (stats.pending > 0 || stats.processing) {
+        console.error(`[Daemon]   queue: ${stats.pending} pending, processing=${stats.processing} — draining`);
+      }
+      _queue.drain("Daemon shutting down");
+    }
+
+    // Close HTTP server (stops accepting new requests; existing ones drain).
+    if (_api && typeof (_api as any).stop === "function") {
+      try { await (_api as any).stop(); } catch (e) { console.error("[Daemon] api.stop failed:", e); }
+    }
+
+    // Close the WebSocket bridge. The extension will reconnect on next launch.
+    if (_bridge && typeof (_bridge as any).stop === "function") {
+      try { await (_bridge as any).stop(); } catch (e) { console.error("[Daemon] bridge.stop failed:", e); }
+    }
+
+    const remainingMs = Math.max(0, deadline - Date.now());
+    console.error(`[Daemon] Drain complete (${HARD_DEADLINE_MS - remainingMs}ms). Goodbye.`);
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (e) {
+    console.error("[Daemon] Error during shutdown:", e);
+    clearTimeout(forceExit);
+    process.exit(1);
+  }
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

@@ -126,6 +126,10 @@ export class HttpApi {
           return this.handleSpawnTab(body, res);
         case "/api/close_tab":
           return this.handleCloseTab(body, res);
+        case "/api/read_console_messages":
+          return this.handleReadConsoleMessages(body, res);
+        case "/api/read_network_requests":
+          return this.handleReadNetworkRequests(body, res);
         default:
           return this.sendJson(res, 404, { ok: false, error: `Unknown route: POST ${url}` });
       }
@@ -500,6 +504,40 @@ export class HttpApi {
     try {
       const result = await this.queue.enqueue(() =>
         this.bridge.send("spawn_tab", { url: body.url || "about:blank" })
+      );
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /**
+   * Read recent console.* output from a tab (captured by console-capture.js
+   * in the page's main world). Body: {tabId?, limit?, clear?}.
+   */
+  private async handleReadConsoleMessages(body: any, res: ServerResponse): Promise<void> {
+    try {
+      const result = await this.queue.enqueue(
+        () => this.bridge.send("read_console_messages", body || {}),
+        15000,
+        body?.tabId,
+      );
+      this.sendJson(res, 200, { ok: true, data: result });
+    } catch (err) {
+      this.sendError(res, err);
+    }
+  }
+
+  /**
+   * Read recent network request lifecycle entries from a tab (captured via
+   * chrome.webRequest). Body: {tabId?, limit?, clear?, urlPattern?, errorsOnly?}.
+   */
+  private async handleReadNetworkRequests(body: any, res: ServerResponse): Promise<void> {
+    try {
+      const result = await this.queue.enqueue(
+        () => this.bridge.send("read_network_requests", body || {}),
+        15000,
+        body?.tabId,
       );
       this.sendJson(res, 200, { ok: true, data: result });
     } catch (err) {

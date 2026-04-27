@@ -19,6 +19,113 @@ let managedTabId = null;
 let managedWindowId = null;
 let tabGroupId = null;
 
+// ─── Network capture ─────────────────────────────────────────────
+//
+// chrome.webRequest listeners track request lifecycle per tab. Events are
+// keyed by chrome's requestId so we can join them across the lifecycle.
+// On completion (or error), the joined entry is pushed to a per-tab ring
+// buffer. Daemon clients read via the read_network_requests command.
+const NETWORK_BUFFER_MAX = 1000;   // per tab
+const networkBuffers = new Map();   // tabId -> Array<entry>
+const networkInflight = new Map();  // requestId -> partial entry (may be on different tab)
+
+function pushNetworkEntry(tabId, entry) {
+  if (typeof tabId !== 'number' || tabId < 0) return;
+  let buf = networkBuffers.get(tabId);
+  if (!buf) {
+    buf = [];
+    networkBuffers.set(tabId, buf);
+  }
+  buf.push(entry);
+  if (buf.length > NETWORK_BUFFER_MAX) buf.shift();
+}
+
+if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+  const filter = { urls: ['<all_urls>'] };
+
+  chrome.webRequest.onBeforeRequest.addListener((d) => {
+    networkInflight.set(d.requestId, {
+      requestId: d.requestId, tabId: d.tabId,
+      url: d.url, method: d.method, type: d.type,
+      startedAt: d.timeStamp, completedAt: null,
+      statusCode: null, statusLine: null, fromCache: false,
+      error: null, responseHeaders: null,
+    });
+  }, filter);
+
+  if (chrome.webRequest.onHeadersReceived) {
+    chrome.webRequest.onHeadersReceived.addListener((d) => {
+      const e = networkInflight.get(d.requestId);
+      if (!e) return;
+      e.statusCode = d.statusCode;
+      e.statusLine = d.statusLine;
+      // Capture a few useful response headers (content-type, content-length)
+      // — full headers can be huge.
+      if (d.responseHeaders) {
+        const interesting = ['content-type', 'content-length', 'cf-ray', 'x-frame-options', 'set-cookie'];
+        e.responseHeaders = {};
+        for (const h of d.responseHeaders) {
+          const n = (h.name || '').toLowerCase();
+          if (interesting.includes(n)) e.responseHeaders[n] = h.value;
+        }
+      }
+    }, filter, ['responseHeaders']);
+  }
+
+  chrome.webRequest.onCompleted.addListener((d) => {
+    const e = networkInflight.get(d.requestId);
+    if (!e) return;
+    networkInflight.delete(d.requestId);
+    e.completedAt = d.timeStamp;
+    e.fromCache = d.fromCache;
+    if (e.statusCode === null) e.statusCode = d.statusCode;
+    pushNetworkEntry(e.tabId, e);
+  }, filter);
+
+  chrome.webRequest.onErrorOccurred.addListener((d) => {
+    const e = networkInflight.get(d.requestId);
+    if (!e) return;
+    networkInflight.delete(d.requestId);
+    e.completedAt = d.timeStamp;
+    e.error = d.error;
+    pushNetworkEntry(e.tabId, e);
+  }, filter);
+}
+
+// ─── Console capture ─────────────────────────────────────────────
+//
+// Per-tab ring buffer of recent console.* and window.onerror events. The
+// content script forwards via runtime.sendMessage; daemon clients read via
+// the read_console_messages command.
+const CONSOLE_BUFFER_MAX = 500;   // per tab
+const consoleBuffers = new Map();   // tabId -> Array<entry>
+
+function pushConsoleEntry(tabId, entry) {
+  let buf = consoleBuffers.get(tabId);
+  if (!buf) {
+    buf = [];
+    consoleBuffers.set(tabId, buf);
+  }
+  buf.push(entry);
+  if (buf.length > CONSOLE_BUFFER_MAX) buf.shift();
+}
+
+// Injects the main-world console wrapper into a tab. Called on every
+// committed navigation so each fresh page gets the wrapper.
+async function injectConsoleCapture(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ['console-capture.js'],
+      world: 'MAIN',
+      injectImmediately: true,
+    });
+  } catch (e) {
+    // chrome:// pages, devtools, file:// without permission etc. just fail
+    // silently — these aren't pages we care about for console capture.
+  }
+}
+
 // ─── Logging ─────────────────────────────────────────────────────
 //
 // Logs everywhere: the local devtools console (so a developer with the SW
@@ -280,9 +387,14 @@ async function handleCommand(msg) {
         neoLog('error', err.message, { params, managedTabId, managedWindowId });
         throw err;
       }
+      // Clear stale console buffer for this tab — caller is starting a new
+      // navigation, old logs aren't relevant to the new page.
+      consoleBuffers.delete(tabId);
       // Explicitly do NOT activate the tab — keeps the user's focus where it is.
       await chrome.tabs.update(tabId, { url: params.url, active: false });
       await waitForTabLoad(tabId, params.timeout || 30000);
+      // Re-inject console capture after the new page is loaded.
+      injectConsoleCapture(tabId);
       const tab = await chrome.tabs.get(tabId);
       return {
         success: true,
@@ -810,6 +922,45 @@ async function handleCommand(msg) {
       return { success: true, pong: true, timestamp: Date.now() };
     }
 
+    // ── Read recent console messages from a tab ──
+    // Returns the buffered console.* and uncaught error events captured by
+    // the main-world wrapper. tabId optional — defaults to managedTabId.
+    // Pass {clear: true} to drop the buffer after reading.
+    case 'read_console_messages': {
+      const tid = (params && typeof params.tabId === 'number') ? params.tabId : managedTabId;
+      if (typeof tid !== 'number') {
+        return { success: true, tabId: null, messages: [], note: 'no tabId given and no managedTabId set' };
+      }
+      const buf = consoleBuffers.get(tid) || [];
+      const limit = (params && typeof params.limit === 'number') ? params.limit : buf.length;
+      const messages = buf.slice(-limit);
+      if (params && params.clear) consoleBuffers.delete(tid);
+      return { success: true, tabId: tid, messages, total_buffered: buf.length };
+    }
+
+    // ── Read recent network requests from a tab ──
+    // Returns the buffered request lifecycle entries captured via
+    // chrome.webRequest. tabId optional — defaults to managedTabId. Optional
+    // {limit, clear, urlPattern, errorsOnly} filters.
+    case 'read_network_requests': {
+      const tid = (params && typeof params.tabId === 'number') ? params.tabId : managedTabId;
+      if (typeof tid !== 'number') {
+        return { success: true, tabId: null, requests: [], note: 'no tabId given and no managedTabId set' };
+      }
+      let buf = networkBuffers.get(tid) || [];
+      if (params && params.urlPattern) {
+        const pat = String(params.urlPattern).toLowerCase();
+        buf = buf.filter(e => (e.url || '').toLowerCase().includes(pat));
+      }
+      if (params && params.errorsOnly) {
+        buf = buf.filter(e => e.error || (e.statusCode && e.statusCode >= 400));
+      }
+      const limit = (params && typeof params.limit === 'number') ? params.limit : buf.length;
+      const requests = buf.slice(-limit);
+      if (params && params.clear) networkBuffers.delete(tid);
+      return { success: true, tabId: tid, requests, total_buffered: (networkBuffers.get(tid) || []).length };
+    }
+
     // ── Tab pool: spawn a new tab in the dedicated window ──
     // Ensures the dedicated window exists, creates a tab inside it, adds it
     // to the existing NeoVision group (or creates one if none exists in
@@ -942,6 +1093,19 @@ function waitForTabLoad(tabId, timeout = 30000) {
 // ─── Message Handler ─────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Console capture forwarded from content.js (main-world wraps console,
+  // postMessage to content.js, content.js forwards here). Stored in a
+  // per-tab ring buffer; read_console_messages command returns it.
+  if (msg.type === 'neo_console_log' && sender.tab) {
+    pushConsoleEntry(sender.tab.id, {
+      level: msg.level || 'log',
+      args: msg.args || [],
+      ts: msg.ts || Date.now(),
+      url: msg.url || sender.tab.url,
+    });
+    return false;
+  }
+
   // Command from daemon, forwarded by offscreen.js — execute and respond
   if (msg.type === 'ws_command') {
     const daemonMsg = msg.msg;
@@ -1027,6 +1191,21 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     managedTabId = null;
     tabGroupId = null;
   }
+  // Always free the console buffer for closed tabs so we don't leak memory.
+  consoleBuffers.delete(tabId);
+});
+
+// Auto-inject console capture on every page-load complete. This catches
+// pages the user navigated to manually (not via /api/navigate) and pages
+// that reload themselves. Idempotent — console-capture.js short-circuits
+// if already injected.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') return;
+  if (!tab.url || !/^https?:\/\//.test(tab.url)) return;
+  // Clear console buffer when URL changed (covers SPA route changes too,
+  // since browser tells us status: complete on the new URL).
+  if (changeInfo.url) consoleBuffers.delete(tabId);
+  injectConsoleCapture(tabId);
 });
 
 /**
