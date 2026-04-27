@@ -17,3 +17,4 @@ enrich-*.js
 enrich-*.md
 HYBRID.md
 .claude/
+.git.broken-*
